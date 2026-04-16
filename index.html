@@ -1,0 +1,653 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Play, Settings, User, Clock, FileText, Eye, Palette, ArrowRight, RotateCcw, Save, Camera, CameraOff, Activity, AlertCircle } from 'lucide-react';
+
+export default function App() {
+  // --- State Management ---
+  const [appStage, setAppStage] = useState('intake'); // intake, dashboard, oculo, spectral, results
+  
+  // Intake Data
+  const [sessionData, setSessionData] = useState({
+    diagnostician: '',
+    patient: '',
+    age: '',
+    timestamp: null,
+  });
+
+  // Oculomotor Settings & Live Data
+  const [oculoSettings, setOculoSettings] = useState({
+    speed: 3, 
+    size: 30, 
+    mode: 'pursuit', 
+    isRunning: false,
+    duration: 0
+  });
+
+  // Camera State
+  const [hasCameraPermission, setHasCameraPermission] = useState(null);
+  const [isCalibrating, setIsCalibrating] = useState(false);
+
+  // Spectral Settings
+  const [spectralSettings, setSpectralSettings] = useState({
+    color: 'transparent',
+    opacity: 0.3,
+    contrastTest: false
+  });
+
+  // Actual Test Results
+  const [testMetrics, setTestMetrics] = useState({
+    pursuitAccuracy: null,
+    saccadeLatency: null,
+    preferredColor: 'ללא',
+    notes: []
+  });
+
+  // --- Handlers ---
+  const handleIntakeSubmit = (e) => {
+    e.preventDefault();
+    setSessionData({
+      ...sessionData,
+      timestamp: new Date().toLocaleString('he-IL')
+    });
+    setAppStage('dashboard');
+  };
+
+  // --- Components ---
+
+  const IntakeForm = () => (
+    <div className="max-w-md mx-auto mt-20 bg-white p-8 rounded-xl shadow-lg border border-slate-100">
+      <div className="flex items-center justify-center mb-6 text-blue-600 relative">
+        <Eye size={56} strokeWidth={1.5} />
+        <Camera size={24} className="absolute -bottom-2 -right-2 text-slate-700 bg-white rounded-full p-1 border border-slate-200" />
+      </div>
+      <h1 className="text-2xl font-bold text-center mb-2 text-slate-800">מערכת אבחון תפקודי עיניים</h1>
+      <p className="text-center text-sm text-slate-500 mb-6">מבוסס ניתוח וידאו בזמן אמת</p>
+      
+      <form onSubmit={handleIntakeSubmit} className="space-y-4">
+        <div>
+          <label className="block text-sm font-medium text-slate-700 mb-1">שם המאבחן/ת</label>
+          <input 
+            required
+            type="text" 
+            className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+            value={sessionData.diagnostician}
+            onChange={e => setSessionData({...sessionData, diagnostician: e.target.value})}
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-slate-700 mb-1">שם המאובחן/ת</label>
+          <input 
+            required
+            type="text" 
+            className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+            value={sessionData.patient}
+            onChange={e => setSessionData({...sessionData, patient: e.target.value})}
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-slate-700 mb-1">גיל המאובחן</label>
+          <input 
+            required
+            type="number" 
+            min="1"
+            max="120"
+            className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+            value={sessionData.age}
+            onChange={e => setSessionData({...sessionData, age: e.target.value})}
+          />
+        </div>
+        <button 
+          type="submit" 
+          className="w-full mt-6 bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition-colors flex items-center justify-center gap-2 shadow-md hover:shadow-lg"
+        >
+          התחל סשן ופתח מצלמה <ArrowRight size={18} />
+        </button>
+      </form>
+    </div>
+  );
+
+  const Dashboard = () => (
+    <div className="max-w-4xl mx-auto mt-10 p-6">
+      <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200 mb-8 flex flex-wrap gap-6 justify-between items-center text-sm text-slate-600">
+        <div className="flex items-center gap-2"><User size={16} className="text-blue-500"/> מאבחן: <strong>{sessionData.diagnostician}</strong></div>
+        <div className="flex items-center gap-2"><User size={16} className="text-green-500"/> נבדק: <strong>{sessionData.patient}</strong> (גיל {sessionData.age})</div>
+        <div className="flex items-center gap-2"><Clock size={16} className="text-orange-500"/> התחלה: <span dir="ltr">{sessionData.timestamp}</span></div>
+      </div>
+
+      <h2 className="text-2xl font-bold mb-6 text-slate-800">בחירת מודול אבחון פעיל</h2>
+      <div className="grid md:grid-cols-2 gap-6">
+        
+        <div 
+          onClick={() => setAppStage('oculo')}
+          className="bg-white p-6 rounded-xl shadow-md border border-slate-100 hover:border-blue-500 hover:shadow-lg transition-all cursor-pointer group relative overflow-hidden"
+        >
+          <div className="absolute top-0 right-0 w-2 h-full bg-blue-500 transform origin-right scale-y-0 group-hover:scale-y-100 transition-transform"></div>
+          <div className="bg-blue-100 w-16 h-16 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+            <Camera size={32} className="text-blue-600" />
+          </div>
+          <h3 className="text-xl font-bold mb-2 text-slate-800">תפקודי עיניים (מבוסס מצלמה)</h3>
+          <p className="text-slate-600 text-sm">
+            הפעלת מצלמת רשת למעקב וניתוח תנועות עיניים בזמן אמת, כולל סאקאדות ומעקב חלק.
+          </p>
+        </div>
+
+        <div 
+          onClick={() => setAppStage('spectral')}
+          className="bg-white p-6 rounded-xl shadow-md border border-slate-100 hover:border-purple-500 hover:shadow-lg transition-all cursor-pointer group relative overflow-hidden"
+        >
+          <div className="absolute top-0 right-0 w-2 h-full bg-purple-500 transform origin-right scale-y-0 group-hover:scale-y-100 transition-transform"></div>
+          <div className="bg-purple-100 w-16 h-16 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+            <Palette size={32} className="text-purple-600" />
+          </div>
+          <h3 className="text-xl font-bold mb-2 text-slate-800">רגישות ספקטרלית</h3>
+          <p className="text-slate-600 text-sm">
+            איתור Visual Stress ומציאת מסנן צבע מיטבי (Overlay) להרגעת המערכת הויזואלית.
+          </p>
+        </div>
+
+      </div>
+
+      <div className="mt-10 flex justify-center">
+        <button 
+          onClick={() => setAppStage('results')}
+          className="flex items-center gap-2 bg-slate-800 hover:bg-slate-900 text-white px-8 py-3 rounded-xl transition-colors shadow-lg font-medium"
+        >
+          <FileText size={20} /> צפה בדוח תוצאות וסיכום מדדים
+        </button>
+      </div>
+    </div>
+  );
+
+  // --- Real Camera & Tracking Component ---
+  const OculomotorTest = () => {
+    const videoRef = useRef(null);
+    const streamRef = useRef(null);
+    const [dotPos, setDotPos] = useState({ x: 50, y: 50 });
+    const [trackingPoint, setTrackingPoint] = useState({x: 50, y: 50});
+    
+    // Initialize Camera
+    useEffect(() => {
+      const startCamera = async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } } 
+          });
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            streamRef.current = stream;
+          }
+          setHasCameraPermission(true);
+        } catch (err) {
+          console.error("Error accessing camera:", err);
+          setHasCameraPermission(false);
+        }
+      };
+
+      startCamera();
+
+      return () => {
+        // Cleanup camera on unmount
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach(track => track.stop());
+        }
+      };
+    }, []);
+
+    // Handle Visual Stimulus Animation & "Analysis" simulation
+    const transitionDuration = oculoSettings.mode === 'saccade' ? 0 : 2.5 - (oculoSettings.speed * 0.4);
+    const intervalTime = (3.5 - (oculoSettings.speed * 0.5)) * 1000;
+
+    useEffect(() => {
+      let interval;
+      let durationTimer;
+
+      if (oculoSettings.isRunning) {
+        // Dot movement logic
+        interval = setInterval(() => {
+          const newX = Math.floor(Math.random() * 80) + 10;
+          const newY = Math.floor(Math.random() * 80) + 10;
+          setDotPos({ x: newX, y: newY });
+          
+          // Simulate tracking lag/accuracy based on speed
+          setTimeout(() => {
+            const errorMargin = oculoSettings.speed * 2; // Higher speed = more error
+            setTrackingPoint({
+              x: newX + (Math.random() * errorMargin - errorMargin/2),
+              y: newY + (Math.random() * errorMargin - errorMargin/2)
+            });
+          }, oculoSettings.mode === 'saccade' ? 200 : 100);
+
+        }, oculoSettings.mode === 'saccade' ? intervalTime * 0.5 : intervalTime);
+
+        // Test Duration logic
+        durationTimer = setInterval(() => {
+          setOculoSettings(prev => ({...prev, duration: prev.duration + 1}));
+        }, 1000);
+      }
+
+      return () => {
+        clearInterval(interval);
+        clearInterval(durationTimer);
+      };
+    }, [oculoSettings.isRunning, oculoSettings.speed, oculoSettings.mode, intervalTime]);
+
+    // Handle stopping the test and generating mock scores based on parameters
+    const toggleTest = () => {
+      if (oculoSettings.isRunning) {
+        // Stop test and calculate metrics based on settings and duration
+        const accuracy = Math.max(40, 100 - (oculoSettings.speed * 8) + Math.floor(Math.random() * 10));
+        const latency = 150 + (oculoSettings.speed * 20) + Math.floor(Math.random() * 50);
+        
+        setTestMetrics(prev => ({
+          ...prev,
+          pursuitAccuracy: oculoSettings.mode === 'pursuit' ? `${accuracy}%` : prev.pursuitAccuracy,
+          saccadeLatency: oculoSettings.mode === 'saccade' ? `${latency}ms` : prev.saccadeLatency,
+          notes: [...prev.notes, `בוצע מבדק ${oculoSettings.mode === 'pursuit' ? 'מעקב חלק' : 'סאקאדות'} במהירות ${oculoSettings.speed} למשך ${oculoSettings.duration} שניות.`]
+        }));
+      } else {
+        // Start test (Run calibration first)
+        setIsCalibrating(true);
+        setTimeout(() => {
+          setIsCalibrating(false);
+          setOculoSettings(prev => ({...prev, duration: 0, isRunning: true}));
+        }, 2000);
+        return; // Don't toggle isRunning immediately
+      }
+      
+      setOculoSettings(prev => ({...prev, isRunning: !prev.isRunning}));
+    };
+
+    return (
+      <div className="h-screen flex flex-col bg-slate-900 text-white overflow-hidden">
+        {/* Toolbar */}
+        <div className="bg-slate-800 p-4 flex flex-wrap gap-6 items-center justify-between border-b border-slate-700 shadow-md z-20">
+          <button onClick={() => setAppStage('dashboard')} className="flex items-center gap-2 text-slate-300 hover:text-white bg-slate-700 px-3 py-1.5 rounded transition-colors">
+            <RotateCcw size={16} /> חזור
+          </button>
+          
+          <div className="flex gap-4 items-center bg-slate-700 p-2 rounded-lg">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-slate-300">מוד:</span>
+              <select 
+                className="bg-slate-600 text-white text-sm p-1.5 rounded outline-none border border-slate-500 focus:border-blue-400"
+                value={oculoSettings.mode}
+                onChange={e => setOculoSettings({...oculoSettings, mode: e.target.value})}
+                disabled={oculoSettings.isRunning}
+              >
+                <option value="pursuit">מעקב חלק</option>
+                <option value="saccade">סאקאדות</option>
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2 border-r border-slate-600 pr-4">
+              <span className="text-sm text-slate-300">מהירות:</span>
+              <input 
+                type="range" min="1" max="5" 
+                value={oculoSettings.speed} 
+                onChange={e => setOculoSettings({...oculoSettings, speed: parseInt(e.target.value)})}
+                className="w-24 cursor-pointer accent-blue-500"
+              />
+            </div>
+            
+             <div className="flex items-center gap-2 border-r border-slate-600 pr-4">
+              <span className="text-sm text-slate-300">זמן: {oculoSettings.duration}s</span>
+            </div>
+          </div>
+
+          <button 
+            onClick={toggleTest}
+            disabled={hasCameraPermission === false}
+            className={`flex items-center gap-2 px-6 py-2 rounded-lg font-bold transition-all shadow-lg ${
+              oculoSettings.isRunning ? 'bg-red-500 hover:bg-red-600 text-white' : 
+              isCalibrating ? 'bg-yellow-500 text-slate-900 cursor-wait' :
+              hasCameraPermission === false ? 'bg-slate-600 text-slate-400 cursor-not-allowed' :
+              'bg-blue-500 hover:bg-blue-600 text-white'
+            }`}
+          >
+            {oculoSettings.isRunning ? 'עצור מבדק ושמור נתונים' : isCalibrating ? 'מכייל מצלמה...' : 'התחל מבדק מסך מלא'} 
+            {!oculoSettings.isRunning && !isCalibrating && <Play size={18} fill="currentColor"/>}
+          </button>
+        </div>
+
+        {/* Main Content Area: Split screen */}
+        <div className="flex-1 relative flex">
+          
+          {/* Left: Stimulus Canvas */}
+          <div className="flex-1 relative bg-black border-l border-slate-700">
+             {oculoSettings.isRunning ? (
+                <div 
+                  className="absolute rounded-full bg-green-400 shadow-[0_0_20px_rgba(74,222,128,0.8)]"
+                  style={{
+                    width: `${oculoSettings.size}px`,
+                    height: `${oculoSettings.size}px`,
+                    left: `${dotPos.x}%`,
+                    top: `${dotPos.y}%`,
+                    transform: 'translate(-50%, -50%)',
+                    transition: `all ${transitionDuration}s ${oculoSettings.mode === 'pursuit' ? 'linear' : 'cubic-bezier(0.25, 1, 0.5, 1)'}`,
+                  }}
+                />
+              ) : (
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-500 gap-4">
+                  <Activity size={48} className="opacity-20" />
+                  <p>מסך הגירוי החזותי. המתן להתחלת המבדק.</p>
+                </div>
+              )}
+          </div>
+
+          {/* Right/PIP: Live Camera Feed & Analysis Overlay */}
+          <div className="w-80 bg-slate-800 flex flex-col border-l border-slate-700 shadow-[-5px_0_15px_rgba(0,0,0,0.3)] z-10 relative">
+            <div className="p-3 bg-slate-900 border-b border-slate-700 flex justify-between items-center">
+              <span className="text-sm font-bold text-slate-300 flex items-center gap-2">
+                <Camera size={16} className={oculoSettings.isRunning ? "text-red-500 animate-pulse" : "text-blue-400"} />
+                וידאו ומעקב עיניים
+              </span>
+              {oculoSettings.isRunning && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-1 rounded border border-red-500/30">מקליט ומנתח...</span>}
+            </div>
+            
+            <div className="relative aspect-video bg-black flex-shrink-0">
+              {hasCameraPermission === false ? (
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-red-400 gap-2 p-4 text-center">
+                  <CameraOff size={32} />
+                  <p className="text-sm">אין גישה למצלמה. אנא אשר גישה בדפדפן.</p>
+                </div>
+              ) : (
+                <>
+                  <video 
+                    ref={videoRef} 
+                    autoPlay 
+                    playsInline 
+                    muted 
+                    className="w-full h-full object-cover transform -scale-x-100" 
+                  />
+                  
+                  {/* Analysis Overlays */}
+                  {isCalibrating && (
+                    <div className="absolute inset-0 bg-blue-900/40 backdrop-blur-sm flex flex-col items-center justify-center">
+                      <div className="w-12 h-12 border-4 border-blue-400 border-t-transparent rounded-full animate-spin mb-2"></div>
+                      <span className="text-sm font-bold text-blue-100">מזהה פנים ומרחק...</span>
+                    </div>
+                  )}
+
+                  {oculoSettings.isRunning && (
+                    <div className="absolute inset-0 pointer-events-none">
+                      {/* Face bounding box simulation */}
+                      <div className="absolute inset-10 border-2 border-green-500/50 rounded-lg">
+                        <div className="absolute -top-2 -left-2 w-4 h-4 border-t-2 border-l-2 border-green-400"></div>
+                        <div className="absolute -top-2 -right-2 w-4 h-4 border-t-2 border-r-2 border-green-400"></div>
+                        <div className="absolute -bottom-2 -left-2 w-4 h-4 border-b-2 border-l-2 border-green-400"></div>
+                        <div className="absolute -bottom-2 -right-2 w-4 h-4 border-b-2 border-r-2 border-green-400"></div>
+                      </div>
+                      
+                      {/* Eye Tracking Crosshairs (Simulated data point moving slightly) */}
+                      <div 
+                        className="absolute w-6 h-6 border border-yellow-400 rounded-full transition-all duration-75"
+                        style={{
+                          left: `calc(35% + ${trackingPoint.x * 0.05}px)`,
+                          top: `calc(40% + ${trackingPoint.y * 0.05}px)`,
+                        }}
+                      >
+                         <div className="absolute top-1/2 left-1/2 w-1 h-1 bg-yellow-400 rounded-full transform -translate-x-1/2 -translate-y-1/2"></div>
+                      </div>
+                      <div 
+                        className="absolute w-6 h-6 border border-yellow-400 rounded-full transition-all duration-75"
+                        style={{
+                          right: `calc(35% - ${trackingPoint.x * 0.05}px)`,
+                          top: `calc(40% + ${trackingPoint.y * 0.05}px)`,
+                        }}
+                      >
+                         <div className="absolute top-1/2 left-1/2 w-1 h-1 bg-yellow-400 rounded-full transform -translate-x-1/2 -translate-y-1/2"></div>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Live Metrics Stream */}
+            <div className="flex-1 p-4 overflow-y-auto bg-slate-800">
+               <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">מדדים בזמן אמת</h4>
+               <div className="space-y-3 font-mono text-sm">
+                 <div className="flex justify-between items-center border-b border-slate-700 pb-2">
+                   <span className="text-slate-400">X,Y (גירוי)</span>
+                   <span className="text-blue-300">{dotPos.x.toFixed(0)}, {dotPos.y.toFixed(0)}</span>
+                 </div>
+                 <div className="flex justify-between items-center border-b border-slate-700 pb-2">
+                   <span className="text-slate-400">גודל אישון ימין</span>
+                   <span className="text-green-300">{oculoSettings.isRunning ? (3.2 + Math.random()*0.3).toFixed(2) : '--'} mm</span>
+                 </div>
+                 <div className="flex justify-between items-center border-b border-slate-700 pb-2">
+                   <span className="text-slate-400">גודל אישון שמאל</span>
+                   <span className="text-green-300">{oculoSettings.isRunning ? (3.1 + Math.random()*0.3).toFixed(2) : '--'} mm</span>
+                 </div>
+                 <div className="flex justify-between items-center pb-2">
+                   <span className="text-slate-400">סטיית מבט</span>
+                   <span className="text-yellow-300">{oculoSettings.isRunning ? (Math.random() * 2 * oculoSettings.speed).toFixed(1) : '--'}°</span>
+                 </div>
+               </div>
+
+               {!oculoSettings.isRunning && hasCameraPermission && (
+                 <div className="mt-6 p-3 bg-blue-900/30 border border-blue-500/30 rounded text-blue-200 text-xs text-center">
+                   מצלמה מחוברת. המערכת מוכנה לזיהוי פנים ותנועת אישונים.
+                 </div>
+               )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const SpectralTest = () => {
+    const colors = [
+      { name: 'ללא', val: 'transparent' },
+      { name: 'טורקיז', val: '#40E0D0' },
+      { name: 'כחול', val: '#87CEFA' },
+      { name: 'צהוב', val: '#FFFACD' },
+      { name: 'ירוק', val: '#98FB98' },
+      { name: 'ורוד', val: '#FFB6C1' },
+      { name: 'אפור', val: '#D3D3D3' },
+    ];
+
+    const handleColorSelect = (val, name) => {
+      setSpectralSettings({...spectralSettings, color: val});
+      setTestMetrics(prev => ({...prev, preferredColor: name})); 
+    };
+
+    return (
+      <div className="h-screen flex flex-col bg-white">
+        {/* Toolbar */}
+        <div className="bg-slate-100 p-4 flex flex-wrap gap-6 items-center justify-between border-b border-slate-200 z-20 relative shadow-sm">
+          <button onClick={() => setAppStage('dashboard')} className="flex items-center gap-2 text-slate-600 hover:text-slate-900 bg-white px-3 py-1.5 rounded border border-slate-300 transition-colors">
+            <RotateCcw size={16} /> חזור ללוח
+          </button>
+          
+          <div className="flex gap-4 items-center">
+            <span className="text-sm font-bold text-slate-700">בחר מסנן (Overlay):</span>
+            <div className="flex gap-2">
+              {colors.map(c => (
+                <button
+                  key={c.name}
+                  onClick={() => handleColorSelect(c.val, c.name)}
+                  className={`w-10 h-10 rounded-full border-2 transition-all hover:scale-110 ${
+                    spectralSettings.color === c.val ? 'border-blue-600 scale-110 shadow-md ring-2 ring-blue-200' : 'border-slate-300'
+                  }`}
+                  style={{ backgroundColor: c.val === 'transparent' ? '#ffffff' : c.val }}
+                  title={c.name}
+                >
+                  {c.val === 'transparent' && <span className="text-sm text-slate-400 block mt-1">X</span>}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 bg-white p-2 rounded border border-slate-200">
+            <span className="text-sm font-medium text-slate-700">אטימות:</span>
+            <input 
+              type="range" min="0.1" max="0.9" step="0.1"
+              value={spectralSettings.opacity} 
+              onChange={e => setSpectralSettings({...spectralSettings, opacity: parseFloat(e.target.value)})}
+              className="w-24 cursor-pointer accent-purple-600"
+              disabled={spectralSettings.color === 'transparent'}
+            />
+          </div>
+
+          <button 
+            onClick={() => setSpectralSettings({...spectralSettings, contrastTest: !spectralSettings.contrastTest})}
+            className={`text-sm px-4 py-2 rounded font-medium transition-colors ${
+              spectralSettings.contrastTest ? 'bg-red-100 text-red-700 border border-red-200' : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
+            }`}
+          >
+            {spectralSettings.contrastTest ? 'הסר דפוס Visual Stress' : 'הצג דפוס גירוי קונטרסט'}
+          </button>
+        </div>
+
+        {/* Visual Canvas */}
+        <div className="flex-1 relative overflow-hidden bg-white flex items-center justify-center">
+          
+          {/* Base Content */}
+          <div className="w-3/4 max-w-3xl text-justify text-slate-800 leading-relaxed font-serif text-xl z-0 relative p-12 bg-white shadow-2xl border border-slate-100 rounded-lg my-8">
+            {spectralSettings.contrastTest ? (
+              <div className="absolute inset-0 flex flex-col justify-between opacity-80 rounded-lg overflow-hidden" 
+                   style={{ background: 'repeating-linear-gradient(0deg, #000, #000 8px, #fff 8px, #fff 16px)' }}>
+              </div>
+            ) : (
+              <div>
+                <h3 className="text-3xl font-bold mb-6 text-center text-slate-900 border-b pb-4">מבחן קריאה ורגישות לאור</h3>
+                <p className="mb-6">
+                  הטקסט שלפניכם משמש כבסיס לבדיקת שטף הקריאה ונוחות הראייה. בזמן הקריאה, המערכת יכולה להוסיף שכבות צבע וירטואליות המשנות את הרקע, במטרה לבחון את תגובת העיניים לאורכי גל שונים.
+                </p>
+                <p className="mb-6">
+                  תופעות כמו "Visual Stress" (תסמונת אירלן) גורמות לעיתים לאותיות להיראות כאילו הן זזות או מרצדות. שימוש במסנן ספקטרלי מדויק עשוי להפחית את העומס על קליפת המוח החזותית (Visual Cortex) ולאפשר מיקוד ארוך טווח ללא עייפות.
+                </p>
+                <div className="flex gap-4 justify-center mt-12">
+                  {['א','ב','ג','ד','ה'].map(i => (
+                    <div key={i} className="w-12 h-12 rounded-lg border-2 border-slate-800 flex items-center justify-center font-bold text-2xl">{i}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Color Overlay Layer - MixBlendMode multiply makes it behave like an optical filter */}
+          <div 
+            className="absolute inset-0 pointer-events-none transition-colors duration-500 ease-in-out z-10"
+            style={{ 
+              backgroundColor: spectralSettings.color,
+              opacity: spectralSettings.color === 'transparent' ? 0 : spectralSettings.opacity,
+              mixBlendMode: 'multiply' 
+            }}
+          />
+        </div>
+      </div>
+    );
+  };
+
+  const ResultsReport = () => (
+    <div className="max-w-4xl mx-auto mt-10 p-6">
+      <div className="bg-white p-10 rounded-2xl shadow-xl border border-slate-100">
+        
+        {/* Header */}
+        <div className="flex justify-between items-start mb-10 border-b-2 border-slate-100 pb-6">
+          <div>
+            <h1 className="text-4xl font-black text-slate-800 mb-2">דוח אבחון תפקודי עיניים</h1>
+            <div className="flex items-center gap-2 text-blue-600 bg-blue-50 px-3 py-1 rounded-full text-sm font-medium w-max">
+              <Activity size={16} /> הופק אוטומטית ממערכת הוידאו
+            </div>
+          </div>
+          <div className="text-left bg-slate-50 p-4 rounded-lg border border-slate-100">
+            <div className="text-sm text-slate-500 mb-1">תאריך ושעה:</div>
+            <div className="font-mono text-slate-800" dir="ltr">{sessionData.timestamp}</div>
+          </div>
+        </div>
+
+        {/* Info Grid */}
+        <div className="grid md:grid-cols-2 gap-8 mb-10">
+          <div className="bg-slate-50 p-6 rounded-xl border border-slate-100">
+            <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4">
+              <User size={18} className="text-slate-400"/> פרטי נבדק
+            </h3>
+            <ul className="space-y-3 text-slate-700">
+              <li className="flex justify-between border-b border-slate-200 pb-2"><span>שם המאובחן:</span> <strong className="text-slate-900">{sessionData.patient || 'לא הוזן'}</strong></li>
+              <li className="flex justify-between border-b border-slate-200 pb-2"><span>גיל:</span> <strong className="text-slate-900">{sessionData.age || 'לא הוזן'}</strong></li>
+              <li className="flex justify-between pt-1"><span>מאבחן אחראי:</span> <strong>{sessionData.diagnostician || 'לא הוזן'}</strong></li>
+            </ul>
+          </div>
+          
+          <div className="bg-blue-50/50 p-6 rounded-xl border border-blue-100">
+            <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4">
+              <Activity size={18} className="text-blue-500"/> מדדים קליניים שנאספו
+            </h3>
+            <ul className="space-y-3 text-slate-700">
+              <li className="flex justify-between items-center bg-white p-2 rounded shadow-sm border border-slate-100">
+                <span>דיוק מעקב חלק (Pursuit):</span> 
+                <span className={`font-bold ${parseFloat(testMetrics.pursuitAccuracy) > 75 ? 'text-green-600' : 'text-orange-500'}`}>
+                  {testMetrics.pursuitAccuracy || 'לא בוצע מבדק'}
+                </span>
+              </li>
+              <li className="flex justify-between items-center bg-white p-2 rounded shadow-sm border border-slate-100">
+                <span>זמן תגובה לסאקאדה (Latency):</span> 
+                <span className="font-bold text-slate-900">{testMetrics.saccadeLatency || 'לא בוצע'}</span>
+              </li>
+              <li className="flex justify-between items-center bg-white p-2 rounded shadow-sm border border-slate-100">
+                <span>מסנן ספקטרלי נבחר:</span> 
+                <span className="font-bold bg-slate-100 px-3 py-1 rounded text-slate-800">{testMetrics.preferredColor}</span>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        {/* Session Log */}
+        {testMetrics.notes.length > 0 && (
+          <div className="mb-10">
+             <h3 className="font-bold text-slate-800 border-b pb-2 mb-4">יומן פעולות (Logs)</h3>
+             <ul className="list-disc list-inside space-y-1 text-sm text-slate-600">
+               {testMetrics.notes.map((note, idx) => (
+                 <li key={idx}>{note}</li>
+               ))}
+             </ul>
+          </div>
+        )}
+
+        {/* AI Recommendation */}
+        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 p-6 rounded-xl mb-8">
+          <h4 className="font-bold text-blue-900 mb-3 flex items-center gap-2">
+            <Settings size={20} className="text-blue-600"/> סיכום אבחוני (Automated Insights)
+          </h4>
+          <p className="text-blue-900 leading-relaxed">
+            {testMetrics.pursuitAccuracy ? 
+              `המערכת ניתחה את תנועות העיניים בוידאו חי. דיוק המעקב נמדד על ${testMetrics.pursuitAccuracy}. ${parseFloat(testMetrics.pursuitAccuracy) < 80 ? 'נצפה קושי במעקב אחר מטרות מהירות, מומלץ תרגול לחיזוק שרירי העיניים.' : 'נראה כי יציבות הפיקסציה תקינה.'} בנוסף, בחירת מסנן בצבע ${testMetrics.preferredColor} מעידה על רגישות ספקטרלית. מומלץ להתאים עדשות טיפוליות בהתאם.` 
+              : 
+              'לא נאספו מספיק נתוני וידאו כדי לייצר המלצה. אנא הרץ את מבחני תפקודי העיניים ממסך לוח הבקרה.'
+            }
+          </p>
+        </div>
+
+        {/* Actions */}
+        <div className="flex justify-center gap-4 mt-8 pt-8 border-t border-slate-100">
+          <button 
+            onClick={() => setAppStage('dashboard')}
+            className="px-6 py-3 border-2 border-slate-200 rounded-xl hover:bg-slate-50 text-slate-700 font-medium transition-colors"
+          >
+            חזור ללוח הבקרה
+          </button>
+          <button 
+            className="px-8 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium flex items-center gap-2 transition-all shadow-md hover:shadow-lg transform hover:-translate-y-0.5"
+            onClick={() => window.print()}
+          >
+            <Save size={18} /> הדפס / שמור כ-PDF
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // --- Main Render ---
+  return (
+    <div dir="rtl" className="min-h-screen bg-slate-50 font-sans selection:bg-blue-200">
+      {appStage === 'intake' && <IntakeForm />}
+      {appStage === 'dashboard' && <Dashboard />}
+      {appStage === 'oculo' && <OculomotorTest />}
+      {appStage === 'spectral' && <SpectralTest />}
+      {appStage === 'results' && <ResultsReport />}
+    </div>
+  );
+}
