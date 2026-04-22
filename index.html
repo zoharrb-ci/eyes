@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>מודול אבחון עיניים - שלב א' (משודרג)</title>
+    <title>מודול אבחון עיניים - שלב א' (משודרג עם גרפים)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     
@@ -14,6 +14,8 @@
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body class="bg-slate-900 text-slate-100 p-4 font-sans h-screen overflow-hidden">
     
@@ -22,8 +24,6 @@
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
 
-        const LEFT_IRIS = [474, 475, 476, 477];
-        const RIGHT_IRIS = [469, 470, 471, 472];
         const LEFT_PUPIL = 468;
         const RIGHT_PUPIL = 473;
         const RIGHT_EYE_TOP = 159;
@@ -31,31 +31,86 @@
         const LEFT_EYE_TOP = 386;
         const LEFT_EYE_BOTTOM = 374;
 
+        // --- רכיב צדדי לציור הגרף (RunChart) ---
+        function RunChart({ data }) {
+            const chartRef = useRef(null);
+            const chartInstance = useRef(null);
+
+            useEffect(() => {
+                if (!chartRef.current || !data || data.length === 0) return;
+                const ctx = chartRef.current.getContext('2d');
+                
+                if (chartInstance.current) {
+                    chartInstance.current.destroy();
+                }
+
+                // מערכי נתונים לגרף
+                const labels = data.map(d => d.timeOffset.toFixed(1) + 's');
+                const ipdData = data.map(d => d.ipd);
+
+                chartInstance.current = new window.Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'מרחק בין אישונים (IPD בפיקסלים)',
+                            data: ipdData,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            fill: true,
+                            tension: 0.3
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        plugins: {
+                            legend: { labels: { color: '#cbd5e1', font: { family: 'sans-serif' } } },
+                            tooltip: { mode: 'index', intersect: false }
+                        },
+                        scales: {
+                            x: { ticks: { color: '#94a3b8', maxTicksLimit: 10 }, grid: { color: '#334155' } },
+                            y: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } }
+                        }
+                    }
+                });
+
+                return () => { if (chartInstance.current) chartInstance.current.destroy(); };
+            }, [data]);
+
+            return <canvas ref={chartRef} style={{ height: '150px', width: '100%' }}></canvas>;
+        }
+
+
         function VisionTrackerApp() {
             const videoRef = useRef(null);
             const canvasRef = useRef(null);
             const animationRef = useRef(null);
-            const blinkHistoryRef = useRef([]); 
-            const isBlinkingRef = useRef(false);
-            const currentRunRef = useRef({ startTime: null }); // ניהול זמן ההרצה הנוכחית
+            
+            // Refs לצורך ניהול הקלטת הנתונים החיה ללא רינדור מחדש
+            const isRecordingRef = useRef(false);
+            const runStartTimeRef = useRef(null);
+            const currentRunDataRef = useRef([]); // נתונים שוטפים (IPD, קואורדינטות)
+            const currentRunBlinksRef = useRef([]); // זמני מצמוצים
+            const isBlinkingStateRef = useRef(false); // מצב עין נוכחי
 
             const [isModelLoaded, setIsModelLoaded] = useState(false);
             const [cameraActive, setCameraActive] = useState(false);
             const [error, setError] = useState(null);
 
             const [metrics, setMetrics] = useState({
-                ipd: 0, distanceEstim: 0, blinks10s: 0,
-                leftPupil: { x: 0, y: 0 }, rightPupil: { x: 0, y: 0 },
+                ipd: 0, distanceEstim: 0, currentRunBlinks: 0, leftPupil: { x: 0, y: 0 }
             });
 
             const [stimulus, setStimulus] = useState({
                 active: false, size: 40, speed: 2, color: '#3b82f6', vector: 'horizontal',
             });
 
-            // מערכת הלוגים החדשה
             const [runLogs, setRunLogs] = useState([]);
 
-            // הפעלת מצלמה ומעקב
             useEffect(() => {
                 let camera = null;
                 let faceMesh = null;
@@ -63,17 +118,11 @@
                 const startTracking = async () => {
                     try {
                         if (!window.FaceMesh) {
-                            setError('ספריות הראייה הממוחשבת עדיין נטענות, אנא רענן את הדף בעוד מספר שניות.');
-                            return;
+                            setError('ספריות הראייה נטענות...'); return;
                         }
                         setIsModelLoaded(true);
-                        faceMesh = new window.FaceMesh({
-                            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
-                        });
-                        faceMesh.setOptions({
-                            maxNumFaces: 1, refineLandmarks: true, 
-                            minDetectionConfidence: 0.5, minTrackingConfidence: 0.5
-                        });
+                        faceMesh = new window.FaceMesh({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}` });
+                        faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
                         faceMesh.onResults(onResults);
 
                         camera = new window.Camera(videoRef.current, {
@@ -82,20 +131,13 @@
                         });
                         await camera.start();
                         setCameraActive(true);
-                    } catch (err) {
-                        setError('שגיאה בהפעלת מצלמה. ודא שאישרת גישה למצלמה בדפדפן.');
-                    }
+                    } catch (err) { setError('שגיאה. ודא שאישרת גישה למצלמה.'); }
                 };
 
                 setTimeout(startTracking, 1000);
-
-                return () => {
-                    if (camera) camera.stop();
-                    if (faceMesh) faceMesh.close();
-                };
+                return () => { if (camera) camera.stop(); if (faceMesh) faceMesh.close(); };
             }, []);
 
-            // עיבוד תוצאות מהמצלמה (פריימים)
             const onResults = useCallback((results) => {
                 const video = videoRef.current;
                 const canvas = canvasRef.current;
@@ -112,8 +154,6 @@
                     window.drawConnectors(ctx, landmarks, window.FACEMESH_TESSELATION, { color: '#C0C0C070', lineWidth: 0.5 });
                     window.drawConnectors(ctx, landmarks, window.FACEMESH_RIGHT_EYE, { color: '#30FF30', lineWidth: 1 });
                     window.drawConnectors(ctx, landmarks, window.FACEMESH_LEFT_EYE, { color: '#30FF30', lineWidth: 1 });
-                    window.drawConnectors(ctx, landmarks, window.FACEMESH_RIGHT_IRIS, { color: '#FF3030', lineWidth: 1 });
-                    window.drawConnectors(ctx, landmarks, window.FACEMESH_LEFT_IRIS, { color: '#FF3030', lineWidth: 1 });
 
                     const rightPupil = landmarks[RIGHT_PUPIL];
                     const leftPupil = landmarks[LEFT_PUPIL];
@@ -131,32 +171,45 @@
                         const leftEyeHeight = Math.abs(landmarks[LEFT_EYE_TOP].y - landmarks[LEFT_EYE_BOTTOM].y);
                         const avgEyeHeight = (rightEyeHeight + leftEyeHeight) / 2;
 
+                        // זיהוי מצמוץ ותיעוד
+                        let justBlinked = false;
                         if (avgEyeHeight < 0.015) {
-                            if (!isBlinkingRef.current) {
-                                isBlinkingRef.current = true;
-                                blinkHistoryRef.current.push(Date.now());
+                            if (!isBlinkingStateRef.current) {
+                                isBlinkingStateRef.current = true;
+                                justBlinked = true;
                             }
                         } else {
-                            isBlinkingRef.current = false;
+                            isBlinkingStateRef.current = false;
                         }
 
-                        const now = Date.now();
-                        blinkHistoryRef.current = blinkHistoryRef.current.filter(time => now - time <= 10000);
-                        const estimatedDistance = (15000 / ipdPx).toFixed(1); 
+                        // תיעוד נתונים שוטפים אם יש הקלטה פעילה
+                        if (isRecordingRef.current && runStartTimeRef.current) {
+                            const timeOffset = (Date.now() - runStartTimeRef.current) / 1000;
+                            
+                            if (justBlinked) {
+                                currentRunBlinksRef.current.push(timeOffset);
+                            }
+
+                            // שמירת נתוני הפריים
+                            currentRunDataRef.current.push({
+                                timeOffset: timeOffset,
+                                ipd: parseFloat(ipdPx.toFixed(1)),
+                                leftX: parseFloat(leftPupil.x.toFixed(3)),
+                                rightX: parseFloat(rightPupil.x.toFixed(3))
+                            });
+                        }
 
                         setMetrics({
                             ipd: ipdPx.toFixed(1),
-                            distanceEstim: estimatedDistance,
-                            blinks10s: blinkHistoryRef.current.length,
-                            leftPupil: { x: (leftPupil.x).toFixed(3), y: (leftPupil.y).toFixed(3) },
-                            rightPupil: { x: (rightPupil.x).toFixed(3), y: (rightPupil.y).toFixed(3) }
+                            distanceEstim: (15000 / ipdPx).toFixed(1),
+                            currentRunBlinks: currentRunBlinksRef.current.length,
+                            leftPupil: { x: (leftPupil.x).toFixed(3), y: (leftPupil.y).toFixed(3) }
                         });
                     }
                 }
                 ctx.restore();
             }, []);
 
-            // מנוע האנימציה - מעודכן לתנועות משולבות
             const [stimulusPos, setStimulusPos] = useState({ x: 50, y: 50 });
 
             useEffect(() => {
@@ -166,31 +219,16 @@
                 const animate = () => {
                     if (!isRunning) return;
                     const timeElapsed = (Date.now() - startTime) / 1000;
-                    
                     const waveX = Math.sin(timeElapsed * stimulus.speed) * 40; 
                     const waveY = Math.cos(timeElapsed * stimulus.speed) * 40;
 
                     switch(stimulus.vector) {
-                        case 'horizontal':
-                            setStimulusPos({ x: 50 + waveX, y: 50 });
-                            break;
-                        case 'vertical':
-                            setStimulusPos({ x: 50, y: 50 + waveX });
-                            break;
-                        case 'diagonal':
-                            setStimulusPos({ x: 50 + waveX, y: 50 + waveX });
-                            break;
-                        case 'circular':
-                            setStimulusPos({ x: 50 + waveX, y: 50 + waveY });
-                            break;
-                        case 'figure8': // מסלול ליסז'ו / שמיניה
-                            setStimulusPos({ 
-                                x: 50 + Math.sin(timeElapsed * stimulus.speed) * 40, 
-                                y: 50 + Math.sin(timeElapsed * stimulus.speed * 2) * 20 
-                            });
-                            break;
+                        case 'horizontal': setStimulusPos({ x: 50 + waveX, y: 50 }); break;
+                        case 'vertical': setStimulusPos({ x: 50, y: 50 + waveX }); break;
+                        case 'diagonal': setStimulusPos({ x: 50 + waveX, y: 50 + waveX }); break;
+                        case 'circular': setStimulusPos({ x: 50 + waveX, y: 50 + waveY }); break;
+                        case 'figure8': setStimulusPos({ x: 50 + Math.sin(timeElapsed * stimulus.speed) * 40, y: 50 + Math.sin(timeElapsed * stimulus.speed * 2) * 20 }); break;
                     }
-                    
                     animationRef.current = requestAnimationFrame(animate);
                 };
 
@@ -203,227 +241,166 @@
                 return () => cancelAnimationFrame(animationRef.current);
             }, [stimulus]);
 
-            // פונקציות להפעלת מבדק ולוגים
+            // פונקציות ניהול הרצה
             const toggleStimulus = () => {
                 if (stimulus.active) {
-                    // כיבוי - רישום הלוג
-                    const duration = ((Date.now() - currentRunRef.current.startTime) / 1000).toFixed(1);
-                    const vectorName = {
-                        'horizontal': 'אופקי', 'vertical': 'אנכי', 'diagonal': 'אלכסוני', 
-                        'circular': 'מעגלי', 'figure8': 'שמיניה'
-                    }[stimulus.vector];
+                    // עצירת מבדק - חישוב ותיעוד
+                    isRecordingRef.current = false;
+                    const durationSeconds = (Date.now() - runStartTimeRef.current) / 1000;
+                    
+                    const totalBlinks = currentRunBlinksRef.current.length;
+                    // חישוב מצמוצים לדקה (BPM)
+                    const blinksPerMinute = durationSeconds > 0 ? ((totalBlinks / durationSeconds) * 60).toFixed(1) : 0;
+                    
+                    const vectorName = { 'horizontal': 'אופקי', 'vertical': 'אנכי', 'diagonal': 'אלכסוני', 'circular': 'מעגלי', 'figure8': 'שמיניה' }[stimulus.vector];
 
                     const newLog = {
                         id: Date.now(),
                         time: new Date().toLocaleTimeString('he-IL'),
-                        duration: duration,
+                        duration: durationSeconds.toFixed(1),
                         vector: vectorName,
                         speed: stimulus.speed,
-                        blinks: metrics.blinks10s,
-                        ipd: metrics.ipd
+                        totalBlinks: totalBlinks,
+                        blinksPerMinute: blinksPerMinute,
+                        blinkTimestamps: [...currentRunBlinksRef.current], // העתקת המערך
+                        continuousData: [...currentRunDataRef.current] // העתקת הנתונים לגרף
                     };
                     
                     setRunLogs(prev => [newLog, ...prev]);
-                    currentRunRef.current.startTime = null;
                     setStimulus({...stimulus, active: false});
+                    
                 } else {
-                    // הדלקה - תחילת מדידה
-                    currentRunRef.current.startTime = Date.now();
+                    // התחלת מבדק
+                    currentRunDataRef.current = [];
+                    currentRunBlinksRef.current = [];
+                    runStartTimeRef.current = Date.now();
+                    isRecordingRef.current = true;
                     setStimulus({...stimulus, active: true});
                 }
             };
 
-            // יצוא ל-CSV
             const exportLogs = () => {
-                if (runLogs.length === 0) {
-                    alert('אין נתונים לשמירה. בצע הרצה של גירוי קודם.');
-                    return;
-                }
-                const BOM = "\uFEFF"; // תמיכה בעברית באקסל
-                const header = "שעה,משך (שניות),כיוון גירוי,מהירות,מצמוצים אחרונים,מרחק אישונים (IPD)\n";
-                const csvData = runLogs.map(l => `${l.time},${l.duration},${l.vector},${l.speed},${l.blinks},${l.ipd}`).join('\n');
+                if (runLogs.length === 0) return alert('אין נתונים לשמירה.');
+                const BOM = "\uFEFF";
+                const header = "שעה,משך (שניות),כיוון,מהירות,סהכ מצמוצים,מצמוצים לדקה,זמני מצמוצים (שניות)\n";
+                const csvData = runLogs.map(l => 
+                    `${l.time},${l.duration},${l.vector},${l.speed},${l.totalBlinks},${l.blinksPerMinute},"${l.blinkTimestamps.map(t => t.toFixed(2)).join(' | ')}"`
+                ).join('\n');
                 
                 const blob = new Blob([BOM + header + csvData], { type: 'text/csv;charset=utf-8;' });
                 const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.setAttribute('download', `Vision_Test_Log_${new Date().getTime()}.csv`);
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
+                const link = document.createElement('a'); link.href = url; link.setAttribute('download', `Vision_Test_Log_${new Date().getTime()}.csv`);
+                document.body.appendChild(link); link.click(); document.body.removeChild(link);
             };
 
             return (
                 <div className="flex flex-col h-full">
-                    <header className="flex justify-between items-center bg-slate-800 p-4 rounded-xl shadow-lg border border-slate-700 mb-4 z-10 relative">
+                    <header className="flex justify-between items-center bg-slate-800 p-4 rounded-xl shadow-lg border border-slate-700 mb-4 z-10 relative shrink-0">
                         <div className="flex items-center gap-3">
-                            <div className={`p-2 rounded-full ${cameraActive ? 'bg-green-500/20 text-green-400' : 'bg-slate-700 text-slate-400'}`}>
-                                📷
-                            </div>
+                            <div className={`p-2 rounded-full ${cameraActive ? 'bg-green-500/20 text-green-400' : 'bg-slate-700 text-slate-400'}`}>📷</div>
                             <div>
-                                <h1 className="text-xl font-bold">מודול אבחון - Tracker V2</h1>
-                                <p className="text-xs text-slate-400">תנועות משולבות ומערכת לוגים</p>
+                                <h1 className="text-xl font-bold">מודול אבחון - Tracker V3 (Live Data & Graphs)</h1>
+                                <p className="text-xs text-slate-400">Computer Vision, Data Logging & Analytics</p>
                             </div>
                         </div>
-                        
-                        {error && (
-                            <div className="flex items-center gap-2 bg-red-500/20 text-red-400 px-4 py-2 rounded-lg border border-red-500/30">
-                                ⚠️ {error}
-                            </div>
-                        )}
-                        {!isModelLoaded && !error && (
-                            <div className="flex items-center gap-2 text-yellow-400">
-                                ⏳ טוען מודל בינה מלאכותית...
-                            </div>
-                        )}
+                        {error && <div className="text-red-400 text-sm px-4 py-2 bg-red-900/30 rounded">{error}</div>}
+                        {stimulus.active && <div className="text-red-400 font-bold animate-pulse flex items-center gap-2"><div className="w-3 h-3 bg-red-500 rounded-full"></div>הקלטה פעילה...</div>}
                     </header>
 
                     <div className="flex flex-1 gap-4 overflow-hidden">
                         
-                        {/* צד ימין: גירוי, מצלמה ומדדים חיים */}
+                        {/* צד ימין: גירוי, מצלמה ומדדים */}
                         <div className="flex-1 flex flex-col gap-4">
-                            
-                            {/* אזור הגירוי החזותי */}
                             <div className="flex-1 bg-black rounded-xl border border-slate-700 relative overflow-hidden shadow-inner flex flex-col">
-                                <div className="absolute top-4 right-4 z-10 bg-slate-800/80 p-2 rounded text-xs font-mono text-slate-300">
-                                    קואורדינטות גירוי: {stimulusPos.x.toFixed(0)}, {stimulusPos.y.toFixed(0)}
-                                </div>
-                                
                                 <div className="flex-1 relative w-full h-full">
                                     {stimulus.active ? (
-                                        <div 
-                                            className="absolute rounded-full shadow-[0_0_20px_rgba(255,255,255,0.3)] transition-transform"
-                                            style={{
-                                                width: `${stimulus.size}px`,
-                                                height: `${stimulus.size}px`,
-                                                backgroundColor: stimulus.color,
-                                                left: `${stimulusPos.x}%`,
-                                                top: `${stimulusPos.y}%`,
-                                                transform: 'translate(-50%, -50%)',
-                                            }}
-                                        />
+                                        <div className="absolute rounded-full shadow-[0_0_20px_rgba(255,255,255,0.3)] transition-transform"
+                                            style={{ width: `${stimulus.size}px`, height: `${stimulus.size}px`, backgroundColor: stimulus.color, left: `${stimulusPos.x}%`, top: `${stimulusPos.y}%`, transform: 'translate(-50%, -50%)' }}/>
                                     ) : (
                                         <div className="absolute inset-0 flex items-center justify-center text-slate-600 font-bold text-xl">
-                                            מסך מבדק. לחץ על 'הפעל גירוי'.
+                                            הגדר גירוי והתחל הקלטה לבניית לוג
                                         </div>
                                     )}
                                 </div>
-
-                                {/* לוח בקרת גירוי */}
                                 <div className="bg-slate-800 border-t border-slate-700 p-4 flex flex-wrap gap-4 items-end justify-between">
                                     <div className="flex items-center gap-4">
                                         <div className="flex flex-col gap-1">
-                                            <span className="text-xs text-slate-400">וקטור ומסלול תנועה:</span>
-                                            <select 
-                                                className="bg-slate-700 text-white text-sm p-2 rounded outline-none border border-slate-600 focus:border-blue-400"
-                                                value={stimulus.vector}
-                                                onChange={e => setStimulus({...stimulus, vector: e.target.value})}
-                                                disabled={stimulus.active}
-                                            >
-                                                <option value="horizontal">אופקי (ימינה-שמאלה)</option>
-                                                <option value="vertical">אנכי (למעלה-למטה)</option>
+                                            <span className="text-xs text-slate-400">מסלול תנועה:</span>
+                                            <select className="bg-slate-700 text-white text-sm p-2 rounded outline-none border border-slate-600" value={stimulus.vector} onChange={e => setStimulus({...stimulus, vector: e.target.value})} disabled={stimulus.active}>
+                                                <option value="horizontal">אופקי (Horizontal)</option>
+                                                <option value="vertical">אנכי (Vertical)</option>
                                                 <option value="diagonal">אלכסוני משולב</option>
-                                                <option value="circular">מעגלי (מיקוד דינמי)</option>
-                                                <option value="figure8">שמיניה (מסלול מורכב)</option>
+                                                <option value="figure8">שמיניה (Figure 8)</option>
                                             </select>
                                         </div>
-                                        <div className="flex flex-col gap-1">
-                                            <span className="text-xs text-slate-400">גודל:</span>
-                                            <input type="range" min="10" max="100" value={stimulus.size} onChange={e => setStimulus({...stimulus, size: parseInt(e.target.value)})} className="w-20 accent-blue-500"/>
-                                        </div>
-                                        <div className="flex flex-col gap-1">
-                                            <span className="text-xs text-slate-400">מהירות:</span>
-                                            <input type="range" min="0.5" max="5" step="0.5" value={stimulus.speed} onChange={e => setStimulus({...stimulus, speed: parseFloat(e.target.value)})} className="w-20 accent-blue-500"/>
-                                        </div>
-                                        <div className="flex flex-col gap-1">
-                                            <span className="text-xs text-slate-400">צבע:</span>
-                                            <input type="color" value={stimulus.color} onChange={e => setStimulus({...stimulus, color: e.target.value})} className="w-8 h-8 rounded cursor-pointer bg-slate-700 border-none"/>
-                                        </div>
+                                        <div className="flex flex-col gap-1"><span className="text-xs text-slate-400">גודל:</span><input type="range" min="10" max="100" value={stimulus.size} onChange={e => setStimulus({...stimulus, size: parseInt(e.target.value)})} className="w-20"/></div>
+                                        <div className="flex flex-col gap-1"><span className="text-xs text-slate-400">מהירות:</span><input type="range" min="0.5" max="5" step="0.5" value={stimulus.speed} onChange={e => setStimulus({...stimulus, speed: parseFloat(e.target.value)})} className="w-20"/></div>
                                     </div>
-                                    <button 
-                                        onClick={toggleStimulus}
-                                        className={`flex items-center gap-2 px-6 py-2 rounded-lg font-bold transition-all shadow-lg ${stimulus.active ? 'bg-red-500 hover:bg-red-600 text-white animate-pulse' : 'bg-blue-500 hover:bg-blue-600 text-white'}`}
-                                    >
-                                        {stimulus.active ? '⏹ עצור מבדק ותעד לוג' : '▶️ התחל מבדק מוקלט'}
+                                    <button onClick={toggleStimulus} className={`px-6 py-2 rounded-lg font-bold shadow-lg ${stimulus.active ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-blue-500 hover:bg-blue-600 text-white'}`}>
+                                        {stimulus.active ? '⏹ עצור הקלטה ונתח' : '▶️ התחל הקלטת מבדק'}
                                     </button>
                                 </div>
                             </div>
                             
-                            {/* מצלמה ומדדים תחתונים */}
-                            <div className="flex gap-4 h-48">
-                                <div className="w-64 bg-slate-800 rounded-xl border border-slate-700 overflow-hidden relative flex-shrink-0">
+                            <div className="flex gap-4 h-48 shrink-0">
+                                <div className="w-64 bg-slate-800 rounded-xl border border-slate-700 overflow-hidden relative">
                                     <video ref={videoRef} className="hidden" playsInline autoPlay muted />
                                     <canvas ref={canvasRef} width="640" height="480" className="w-full h-full object-cover transform -scale-x-100 bg-black" />
-                                    <div className="absolute top-2 right-2 bg-black/60 text-xs px-2 py-1 rounded text-green-400 flex items-center gap-1">
-                                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div> Live
-                                    </div>
                                 </div>
-
-                                <div className="flex-1 bg-slate-800 rounded-xl border border-slate-700 p-4 overflow-y-auto">
-                                    <h2 className="text-sm font-bold text-slate-300 mb-3 border-b border-slate-700 pb-2">מדדים חיים (Live Metrics)</h2>
-                                    <div className="grid grid-cols-4 gap-3">
-                                        <div className="bg-slate-900 p-2 rounded border border-slate-700 text-center">
-                                            <div className="text-[10px] text-slate-400">IPD (מרחק אישונים)</div>
-                                            <div className="text-lg font-mono text-white">{metrics.ipd} <span className="text-xs">px</span></div>
+                                <div className="flex-1 bg-slate-800 rounded-xl border border-slate-700 p-4 flex flex-col justify-center">
+                                    <div className="grid grid-cols-3 gap-4">
+                                        <div className="bg-slate-900 p-3 rounded border border-slate-700 text-center">
+                                            <div className="text-xs text-slate-400 mb-1">מצמוצים בהרצה הנוכחית</div>
+                                            <div className="text-3xl font-mono text-yellow-400">{stimulus.active ? metrics.currentRunBlinks : '-'}</div>
                                         </div>
-                                        <div className="bg-slate-900 p-2 rounded border border-slate-700 text-center">
-                                            <div className="text-[10px] text-slate-400">מרחק משוער</div>
-                                            <div className="text-lg font-mono text-white">{metrics.distanceEstim} <span className="text-xs">cm</span></div>
+                                        <div className="bg-slate-900 p-3 rounded border border-slate-700 text-center">
+                                            <div className="text-xs text-slate-400 mb-1">IPD רגעי (פיקסלים)</div>
+                                            <div className="text-3xl font-mono text-white">{metrics.ipd}</div>
                                         </div>
-                                        <div className="bg-slate-900 p-2 rounded border border-slate-700 text-center">
-                                            <div className="text-[10px] text-slate-400">מצמוצים (10 שניות)</div>
-                                            <div className="text-lg font-mono text-yellow-400">{metrics.blinks10s}</div>
-                                        </div>
-                                        <div className="bg-slate-900 p-2 rounded border border-slate-700 text-center">
-                                            <div className="text-[10px] text-slate-400">אישון שמאל (X)</div>
-                                            <div className="text-lg font-mono text-blue-300">{metrics.leftPupil.x}</div>
+                                        <div className="bg-slate-900 p-3 rounded border border-slate-700 text-center">
+                                            <div className="text-xs text-slate-400 mb-1">אישון שמאלי (X)</div>
+                                            <div className="text-3xl font-mono text-blue-300">{metrics.leftPupil.x}</div>
                                         </div>
                                     </div>
                                 </div>
                             </div>
-
                         </div>
 
-                        {/* צד שמאל: פאנל לוגים תוצאות */}
-                        <div className="w-[350px] bg-slate-800 rounded-xl border border-slate-700 p-4 flex flex-col">
-                            <div className="flex justify-between items-center border-b border-slate-700 pb-3 mb-3">
-                                <h2 className="text-lg font-bold flex items-center gap-2">
-                                    📋 היסטוריית הרצות
-                                </h2>
-                                <button 
-                                    onClick={exportLogs}
-                                    className="bg-green-600 hover:bg-green-500 text-white text-xs px-3 py-1.5 rounded transition-colors shadow"
-                                >
-                                    💾 שמור כ-CSV
-                                </button>
+                        {/* צד שמאל: לוגים מפורטים וגרפים */}
+                        <div className="w-[450px] bg-slate-800 rounded-xl border border-slate-700 p-4 flex flex-col overflow-hidden shrink-0">
+                            <div className="flex justify-between items-center border-b border-slate-700 pb-3 mb-3 shrink-0">
+                                <h2 className="text-lg font-bold">📋 אנליטיקה וגרפים</h2>
+                                <button onClick={exportLogs} className="bg-green-600 hover:bg-green-500 text-white text-xs px-3 py-1.5 rounded shadow">💾 הורד CSV</button>
                             </div>
                             
-                            <div className="flex-1 overflow-y-auto pr-1 space-y-3">
-                                {runLogs.length === 0 ? (
-                                    <div className="text-center text-slate-500 text-sm mt-10">
-                                        אין נתונים עדיין.<br/>הרץ גירוי ועצור אותו כדי לתעד תוצאות.
-                                    </div>
-                                ) : (
-                                    runLogs.map((log, index) => (
-                                        <div key={log.id} className="bg-slate-900 border border-slate-600 p-3 rounded-lg text-sm">
-                                            <div className="flex justify-between text-xs text-slate-400 mb-2 border-b border-slate-700 pb-1">
-                                                <span>הרצה #{runLogs.length - index}</span>
-                                                <span>{log.time}</span>
+                            <div className="flex-1 overflow-y-auto pr-1 space-y-4 pb-10">
+                                {runLogs.length === 0 && <div className="text-center text-slate-500 mt-10">הקלט מבדק כדי לראות את הגרפים וניתוח המצמוצים.</div>}
+                                {runLogs.map((log, index) => (
+                                    <div key={log.id} className="bg-slate-900 border border-slate-600 p-4 rounded-xl flex flex-col gap-3">
+                                        <div className="flex justify-between items-start border-b border-slate-700 pb-2">
+                                            <div>
+                                                <div className="font-bold text-white">הרצה #{runLogs.length - index}</div>
+                                                <div className="text-xs text-slate-400">{log.time} | מסלול {log.vector} | {log.duration} שנ'</div>
                                             </div>
-                                            <div className="grid grid-cols-2 gap-y-1 gap-x-2">
-                                                <div className="text-slate-300">זמן הרצה: <strong className="text-white">{log.duration}s</strong></div>
-                                                <div className="text-slate-300">כיוון: <strong className="text-blue-300">{log.vector}</strong></div>
-                                                <div className="text-slate-300">מהירות: <strong className="text-white">{log.speed}</strong></div>
-                                                <div className="text-slate-300">IPD סופי: <strong className="text-white">{log.ipd}</strong></div>
+                                            <div className="text-right">
+                                                <div className="text-sm font-bold text-yellow-400">{log.totalBlinks} מצמוצים</div>
+                                                <div className="text-xs text-slate-300">קצב: {log.blinksPerMinute} / דקה</div>
                                             </div>
-                                            {log.blinks > 0 && (
-                                                <div className="mt-2 text-xs bg-yellow-500/20 text-yellow-300 px-2 py-1 rounded">
-                                                    זוהו {log.blinks} מצמוצים בזמן הבדיקה.
-                                                </div>
-                                            )}
                                         </div>
-                                    ))
-                                )}
+                                        
+                                        {/* תצוגת זמני המצמוץ */}
+                                        {log.totalBlinks > 0 && (
+                                            <div className="text-xs text-slate-400 bg-slate-800 p-2 rounded">
+                                                <strong>זמני מופע (שניות):</strong> {log.blinkTimestamps.map(t => t.toFixed(1)).join(', ')}
+                                            </div>
+                                        )}
+
+                                        {/* אזור הגרף להרצה הזו */}
+                                        <div className="h-[150px] w-full bg-slate-800/50 rounded p-1 border border-slate-700">
+                                            <RunChart data={log.continuousData} />
+                                        </div>
+                                    </div>
+                                ))}
                             </div>
                         </div>
 
