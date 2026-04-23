@@ -388,7 +388,13 @@
                 setManualDistanceCm(val);
                 setIsManualDistance(true); 
             };
+const CREDIT_CARD_WIDTH_MM = 85.6;
+const MAX_SAMPLES_PER_RUN = 5000;
 
+const handleCalibrationDone = () => {
+    const mmPerPixelCalculated = CREDIT_CARD_WIDTH_MM / calibBoxWidth;
+    setCalibData({ mmPerPx: mmPerPixelCalculated, distanceCm: manualDistanceCm });
+    setAppStage('testing');
             const handleCalibrationDone = () => {
                 const mmPerPixelCalculated = CREDIT_CARD_WIDTH_MM / calibBoxWidth;
                 setCalibData({ mmPerPx: mmPerPixelCalculated, distanceCm: manualDistanceCm });
