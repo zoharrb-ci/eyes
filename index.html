@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <title>מערכת אבחון עיניים - V13 (EAR Blinks & Cyclic Graphs)</title>
+    <title>מערכת אבחון עיניים - V14 (Complete & Stable)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -19,7 +19,20 @@
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
 
-        // --- רכיב הגרפים (עם אלגוריתם אירועים מחזורי ומשופר) ---
+        // --- קבועים ומשתנים גלובליים ---
+        const LEFT_PUPIL = 468; const RIGHT_PUPIL = 473;
+        const RIGHT_EYE_INNER = 133; const RIGHT_EYE_OUTER = 33;
+        const LEFT_EYE_INNER = 362; const LEFT_EYE_OUTER = 263;
+        const RIGHT_EYE_TOP = 159; const RIGHT_EYE_BOTTOM = 145;
+        const LEFT_EYE_TOP = 386; const LEFT_EYE_BOTTOM = 374;
+        
+        const MAX_SAMPLES_PER_RUN = 15000;
+        const CREDIT_CARD_WIDTH_MM = 85.6;
+
+        // פונקציית עזר לחישוב מרחק גיאומטרי בין שתי נקודות (לצורך זיהוי מצמוץ)
+        const pDist = (p1, p2, w, h) => Math.sqrt(Math.pow((p1.x - p2.x) * w, 2) + Math.pow((p1.y - p2.y) * h, 2));
+
+        // --- רכיב הגרפים ---
         function RunCharts({ data, testType, isFullscreen = false }) {
             const chartRef = useRef(null);
             const chartInstance = useRef(null);
@@ -31,7 +44,6 @@
 
                 const eventData = new Array(data.length).fill(null);
                 
-                // מעקב מצב (State Tracking) לפיתרון בעיית האפסים (Race Condition)
                 let currentXDir = 1; let currentYDir = 1; let currentSizeDir = 1;
                 let lastMidlineMark = -100;
                 let lastExtremumMark = -100;
@@ -43,25 +55,24 @@
                         const prev = data[i - 1]?.stimulus;
                         if (!curr || !prev) continue;
 
-                        // 1. חישוב חציית אמצע - מחזורי
+                        // 1. חישוב חציית אמצע
                         if (testType !== 'התכנסות (NPC)') {
                             if ((prev.x <= 50 && curr.x > 50) || (prev.x >= 50 && curr.x < 50) || 
                                 (prev.y <= 50 && curr.y > 50) || (prev.y >= 50 && curr.y < 50)) {
-                                if (i - lastMidlineMark > 15) { // Cooldown
+                                if (i - lastMidlineMark > 15) { 
                                     eventData[i] = { type: 'midline', label: 'חציית אמצע', color: 'rgba(156, 163, 175, 0.7)', dash: [4, 4], width: 1.5 };
                                     lastMidlineMark = i;
                                 }
                             }
                         }
 
-                        // 2. זיהוי נקודות קיצון (Min/Max) עמיד לתקיעות פריים
+                        // 2. זיהוי נקודות קיצון
                         const dx = curr.x - prev.x;
                         const dy = curr.y - prev.y;
                         const dSize = curr.size - prev.size;
                         
                         let isExtremum = false;
 
-                        // עדכון כיוון רק כשיש תנועה ממשית (מנטרל פריימים כפולים/אפסים)
                         if (Math.abs(dx) > 0.05) {
                             const newDir = Math.sign(dx);
                             if (newDir !== currentXDir) { isExtremum = true; currentXDir = newDir; }
@@ -78,7 +89,6 @@
                         }
 
                         if (isExtremum && (i - lastExtremumMark > 15)) {
-                            // אל תדרוס סימון אמצע אם הם נפלו בדיוק באותו פריים במקרה
                             if (!eventData[i]) {
                                 eventData[i] = { type: 'direction', label: 'שינוי כיוון', color: 'rgba(234, 179, 8, 0.8)', dash: [2, 2], width: 2 };
                                 lastExtremumMark = i;
@@ -125,7 +135,6 @@
                                 if (event.dash.length > 0) ctx.setLineDash(event.dash);
                                 ctx.stroke(); 
                                 
-                                // סידור טקסטים מדורג
                                 ctx.setLineDash([]);
                                 const yOffset = topY + 15 + ((textDrawCount % 4) * 16);
                                 textDrawCount++;
@@ -181,6 +190,7 @@
             );
         }
 
+        // --- האפליקציה המרכזית ---
         function App() {
             const videoRef = useRef(null);
             const canvasRef = useRef(null);
@@ -214,6 +224,7 @@
             const [runLogs, setRunLogs] = useState([]);
             const [fullscreenChartData, setFullscreenChartData] = useState(null);
 
+            // הפעלת מצלמה פעם אחת בלבד בעת טעינת האפליקציה
             useEffect(() => {
                 let camera = null; let faceMesh = null;
                 const startTracking = async () => {
@@ -253,11 +264,9 @@
                 }
             }, [testState, testConfig.acuity, testConfig.color, getBaseStimulusSizePx]);
 
-            // פונקציית עזר למדידת מרחק בין נקודות MediaPipe (בשביל EAR)
-            const pDist = (p1, p2, w, h) => Math.sqrt(Math.pow((p1.x - p2.x) * w, 2) + Math.pow((p1.y - p2.y) * h, 2));
-
             const onResults = useCallback((results) => {
                 const width = 640; const height = 480;
+                // ציור הכיול מתבצע רק כשאנחנו במסך הכיול
                 if (canvasRef.current && appStageRef.current === 'calibration') {
                     const ctx = canvasRef.current.getContext('2d');
                     ctx.clearRect(0, 0, width, height);
@@ -272,12 +281,6 @@
                 if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) return;
                 const lm = results.multiFaceLandmarks[0];
 
-                // נקודות בסיס (MediaPipe)
-                const RIGHT_EYE_INNER = 133; const RIGHT_EYE_OUTER = 33;
-                const LEFT_EYE_INNER = 362; const LEFT_EYE_OUTER = 263;
-                const RIGHT_PUPIL = 473; const LEFT_PUPIL = 468;
-                
-                // נרמול אישונים
                 const rightNorm = ((lm[RIGHT_PUPIL].x - lm[RIGHT_EYE_INNER].x) / (lm[RIGHT_EYE_OUTER].x - lm[RIGHT_EYE_INNER].x)) * 100;
                 const leftNorm = ((lm[LEFT_PUPIL].x - lm[LEFT_EYE_OUTER].x) / (lm[LEFT_EYE_INNER].x - lm[LEFT_EYE_OUTER].x)) * 100;
 
@@ -286,14 +289,13 @@
                 const currentJitter = (deltaLeft + deltaRight) / 2;
                 lastNormPosRef.current = { left: leftNorm, right: rightNorm };
 
-                // חישוב IPD (במילימטרים)
                 const dx = (lm[LEFT_PUPIL].x - lm[RIGHT_PUPIL].x) * width;
                 const dy = (lm[LEFT_PUPIL].y - lm[RIGHT_PUPIL].y) * height;
                 const ipdPx = Math.sqrt(dx*dx + dy*dy);
                 const currentMmPerPx = calibData.mmPerPx || 1;
                 const currentIpdMm = ipdPx * currentMmPerPx;
 
-                // --- חישוב EAR לזיהוי מצמוצים מוחלט ---
+                // חישוב EAR (Eye Aspect Ratio) למצמוצים
                 const rightW = pDist(lm[33], lm[133], width, height);
                 const rightH = pDist(lm[159], lm[145], width, height);
                 const rightEAR = rightH / rightW;
@@ -305,7 +307,6 @@
                 const avgEAR = (rightEAR + leftEAR) / 2;
                 
                 let justBlinked = false;
-                // סף EAR אוניברסלי שאינו מושפע ממרחק (בד"כ עין פתוחה > 0.25, מצמוץ < 0.18)
                 if (avgEAR < 0.18) {
                     if (!isBlinkingStateRef.current) { 
                         isBlinkingStateRef.current = true; 
@@ -388,13 +389,7 @@
                 setManualDistanceCm(val);
                 setIsManualDistance(true); 
             };
-const CREDIT_CARD_WIDTH_MM = 85.6;
-const MAX_SAMPLES_PER_RUN = 5000;
 
-const handleCalibrationDone = () => {
-    const mmPerPixelCalculated = CREDIT_CARD_WIDTH_MM / calibBoxWidth;
-    setCalibData({ mmPerPx: mmPerPixelCalculated, distanceCm: manualDistanceCm });
-    setAppStage('testing');
             const handleCalibrationDone = () => {
                 const mmPerPixelCalculated = CREDIT_CARD_WIDTH_MM / calibBoxWidth;
                 setCalibData({ mmPerPx: mmPerPixelCalculated, distanceCm: manualDistanceCm });
@@ -427,7 +422,6 @@ const handleCalibrationDone = () => {
                         data: finalData 
                     };
                     setRunLogs(prev => [logEntry, ...prev]);
-                    // איפוס מונה מצמוצים של הממשק הראשי בסיום בדיקה
                     setMetrics(prev => ({...prev, blinkCount: 0})); 
                 }
             };
@@ -438,10 +432,10 @@ const handleCalibrationDone = () => {
 
                     {/* --- מסך כיול --- */}
                     <div style={{ display: appStage === 'calibration' ? 'flex' : 'none' }} className="flex-col items-center justify-center h-full p-8 text-center relative z-10 w-full">
-                        <h1 className="text-4xl font-bold text-white mb-2">כיול קליני משולב (EAR Blinks Ready)</h1>
+                        <h1 className="text-4xl font-bold text-white mb-2">כיול קליני משולב</h1>
                         <p className="text-slate-300 mb-6 max-w-3xl text-[15px] leading-relaxed">
                             התאם את המלבן לכרטיס כדי לכייל צפיפות פיקסלים.<br/> 
-                            הכנסת מרחק מדויק תבטיח תצוגה בגודל Snellen מושלם. (זיהוי מצמוצים פועל כעת אוטומטית בכל מרחק).
+                            הכנסת מרחק מדויק תבטיח תצוגה בגודל Snellen מושלם.
                         </p>
                         
                         <div className="flex gap-8 items-stretch justify-center w-full max-w-5xl">
