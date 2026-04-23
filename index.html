@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <title>מערכת אבחון עיניים - V12 (Cyclic Graph Annotations Fix)</title>
+    <title>מערכת אבחון עיניים - V13 (EAR Blinks & Cyclic Graphs)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -19,15 +19,7 @@
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
 
-        const LEFT_PUPIL = 468; const RIGHT_PUPIL = 473;
-        const RIGHT_EYE_INNER = 133; const RIGHT_EYE_OUTER = 33;
-        const LEFT_EYE_INNER = 362; const LEFT_EYE_OUTER = 263;
-        const RIGHT_EYE_TOP = 159; const RIGHT_EYE_BOTTOM = 145;
-        const LEFT_EYE_TOP = 386; const LEFT_EYE_BOTTOM = 374;
-        const MAX_SAMPLES_PER_RUN = 15000;
-        const CREDIT_CARD_WIDTH_MM = 85.6;
-
-        // --- רכיב הגרפים (עם אלגוריתם זיהוי מחזורי חכם) ---
+        // --- רכיב הגרפים (עם אלגוריתם אירועים מחזורי ומשופר) ---
         function RunCharts({ data, testType, isFullscreen = false }) {
             const chartRef = useRef(null);
             const chartInstance = useRef(null);
@@ -39,14 +31,11 @@
 
                 const eventData = new Array(data.length).fill(null);
                 
-                // משתני State למעקב רציף אחר הגירוי לכל אורך הבדיקה
-                let lastXSign = 0; let lastYSign = 0; let lastSizeSign = 0;
-                let lastXState = data[0]?.stimulus?.x >= 50 ? 1 : -1;
-                let lastYState = data[0]?.stimulus?.y >= 50 ? 1 : -1;
-                
-                let lastDirMarkIndex = -100;
-                let lastMidMarkIndex = -100;
-                let lastBreakIndex = -100;
+                // מעקב מצב (State Tracking) לפיתרון בעיית האפסים (Race Condition)
+                let currentXDir = 1; let currentYDir = 1; let currentSizeDir = 1;
+                let lastMidlineMark = -100;
+                let lastExtremumMark = -100;
+                let lastBreakMark = -100;
 
                 try {
                     for (let i = 1; i < data.length; i++) {
@@ -54,48 +43,47 @@
                         const prev = data[i - 1]?.stimulus;
                         if (!curr || !prev) continue;
 
-                        // 1. חישוב חציית קו אמצע (מחזורי)
+                        // 1. חישוב חציית אמצע - מחזורי
                         if (testType !== 'התכנסות (NPC)') {
-                            const currXState = curr.x >= 50 ? 1 : -1;
-                            const currYState = curr.y >= 50 ? 1 : -1;
-                            
-                            if ((currXState !== lastXState && Math.abs(curr.x - 50) < 15) || 
-                                (currYState !== lastYState && Math.abs(curr.y - 50) < 15)) {
-                                if (i - lastMidMarkIndex > 15) { // מונע שרטוט כפול עקב רעש בפיקסל האמצע
-                                    eventData[i] = { type: 'midline', label: 'אמצע', color: 'rgba(156, 163, 175, 0.7)', dash: [4, 4], width: 1.5 };
-                                    lastMidMarkIndex = i;
+                            if ((prev.x <= 50 && curr.x > 50) || (prev.x >= 50 && curr.x < 50) || 
+                                (prev.y <= 50 && curr.y > 50) || (prev.y >= 50 && curr.y < 50)) {
+                                if (i - lastMidlineMark > 15) { // Cooldown
+                                    eventData[i] = { type: 'midline', label: 'חציית אמצע', color: 'rgba(156, 163, 175, 0.7)', dash: [4, 4], width: 1.5 };
+                                    lastMidlineMark = i;
                                 }
                             }
-                            lastXState = currXState; lastYState = currYState;
                         }
 
-                        // 2. חישוב נקודות קיצון (Min/Max) - עמיד בפני פריימים ריקים
+                        // 2. זיהוי נקודות קיצון (Min/Max) עמיד לתקיעות פריים
                         const dx = curr.x - prev.x;
                         const dy = curr.y - prev.y;
-                        const dSize = curr.size - prev.size; // רלוונטי ל-NPC
-
-                        // מעדכנים את הכיוון רק אם באמת הייתה תנועה
-                        let currentXSign = lastXSign; if (Math.abs(dx) > 0.05) currentXSign = Math.sign(dx);
-                        let currentYSign = lastYSign; if (Math.abs(dy) > 0.05) currentYSign = Math.sign(dy);
-                        let currentSizeSign = lastSizeSign; if (Math.abs(dSize) > 0.05) currentSizeSign = Math.sign(dSize);
-
-                        let isDirectionChange = false;
+                        const dSize = curr.size - prev.size;
                         
-                        if (testType === 'התכנסות (NPC)') {
-                            // בהתכנסות, הקיצון הוא כאשר הגירוי משנה מגמה (התקרבות/התרחקות)
-                            if (lastSizeSign !== 0 && currentSizeSign !== lastSizeSign) isDirectionChange = true;
-                        } else {
-                            // במעקב, הקיצון הוא קצות המסך ב-X או Y
-                            if (lastXSign !== 0 && currentXSign !== lastXSign) isDirectionChange = true;
-                            if (lastYSign !== 0 && currentYSign !== lastYSign) isDirectionChange = true;
+                        let isExtremum = false;
+
+                        // עדכון כיוון רק כשיש תנועה ממשית (מנטרל פריימים כפולים/אפסים)
+                        if (Math.abs(dx) > 0.05) {
+                            const newDir = Math.sign(dx);
+                            if (newDir !== currentXDir) { isExtremum = true; currentXDir = newDir; }
+                        }
+                        if (Math.abs(dy) > 0.05) {
+                            const newDir = Math.sign(dy);
+                            if (newDir !== currentYDir) { isExtremum = true; currentYDir = newDir; }
+                        }
+                        if (Math.abs(dSize) > 0.05) {
+                            const newDir = Math.sign(dSize);
+                            if (newDir !== currentSizeDir && testType === 'התכנסות (NPC)') { 
+                                isExtremum = true; currentSizeDir = newDir; 
+                            }
                         }
 
-                        if (isDirectionChange && (i - lastDirMarkIndex > 20)) {
-                            eventData[i] = { type: 'direction', label: 'קצה (Min/Max)', color: 'rgba(234, 179, 8, 0.8)', dash: [2, 2], width: 2 };
-                            lastDirMarkIndex = i;
+                        if (isExtremum && (i - lastExtremumMark > 15)) {
+                            // אל תדרוס סימון אמצע אם הם נפלו בדיוק באותו פריים במקרה
+                            if (!eventData[i]) {
+                                eventData[i] = { type: 'direction', label: 'שינוי כיוון', color: 'rgba(234, 179, 8, 0.8)', dash: [2, 2], width: 2 };
+                                lastExtremumMark = i;
+                            }
                         }
-
-                        lastXSign = currentXSign; lastYSign = currentYSign; lastSizeSign = currentSizeSign;
 
                         // 3. חישוב שבירה / בריחת עין
                         const currentJitter = data[i].jitterAvg || 0;
@@ -104,15 +92,15 @@
 
                         if (testType === 'התכנסות (NPC)') {
                             const ipdJump = (data[i].ipd || 0) - (data[i - 1].ipd || 0);
-                            if (ipdJump > 1.0) { isBreak = true; breakLabel = 'שבירת התכנסות'; }
+                            if (ipdJump > 0.8) { isBreak = true; breakLabel = 'שבירת התכנסות'; }
                             else if (currentJitter > 2.5) { isBreak = true; breakLabel = 'בריחה (ריצוד)'; }
                         } else {
-                            if (currentJitter > 2.5) { isBreak = true; breakLabel = 'בריחת עין'; }
+                            if (currentJitter > 2.5) { isBreak = true; breakLabel = 'איבוד (סאקאדה)'; }
                         }
 
-                        if (isBreak && (i - lastBreakIndex > 40)) {
+                        if (isBreak && (i - lastBreakMark > 30)) {
                             eventData[i] = { type: 'break', label: breakLabel, color: 'rgba(239, 68, 68, 1)', dash: [], width: 2.5 };
-                            lastBreakIndex = i;
+                            lastBreakMark = i;
                         }
                     }
                 } catch (e) { console.error("שגיאה בחישוב אירועי גרף", e); }
@@ -126,7 +114,7 @@
                         ctx.font = isFullscreen ? 'bold 12px Arial' : '10px Arial';
                         ctx.textAlign = 'right';
 
-                        let drawnCount = 0;
+                        let textDrawCount = 0;
                         eventData.forEach((event, index) => {
                             if (event) {
                                 const xPos = xAxis.getPixelForTick(index);
@@ -137,16 +125,16 @@
                                 if (event.dash.length > 0) ctx.setLineDash(event.dash);
                                 ctx.stroke(); 
                                 
-                                // פיזור גובה הטקסטים כדי למנוע חפיפה צפופה על הגרף
+                                // סידור טקסטים מדורג
                                 ctx.setLineDash([]);
-                                const yOffset = topY + 15 + ((drawnCount % 4) * 18);
-                                drawnCount++;
+                                const yOffset = topY + 15 + ((textDrawCount % 4) * 16);
+                                textDrawCount++;
                                 
                                 const textWidth = ctx.measureText(event.label).width;
-                                ctx.fillStyle = 'rgba(15, 23, 42, 0.75)'; // רקע לטקסט
+                                ctx.fillStyle = 'rgba(15, 23, 42, 0.7)';
                                 ctx.fillRect(xPos - textWidth - 6, yOffset - 11, textWidth + 8, 16);
                                 
-                                ctx.fillStyle = event.color.replace(/[\d\.]+\)$/g, '1)'); // טקסט צבוע
+                                ctx.fillStyle = event.color.replace(/[\d\.]+\)$/g, '1)');
                                 ctx.fillText(event.label, xPos - 4, yOffset);
                                 ctx.restore();
                             }
@@ -185,15 +173,14 @@
                 <div className="flex flex-col h-full">
                     <div className="flex-1 relative"><canvas ref={chartRef} style={{ width: '100%', height: '100%' }}></canvas></div>
                     <div className={`flex flex-wrap gap-4 mt-2 text-xs justify-center ${isFullscreen ? 'text-sm font-bold' : ''}`}>
-                        <span className="text-slate-400 border-b-2 border-dashed border-slate-400">חציית קו אמצע (Mid)</span>
-                        <span className="text-yellow-500 border-b-2 border-dashed border-yellow-500">שינוי כיוון (Min/Max)</span>
+                        <span className="text-slate-400 border-b-2 border-dashed border-slate-400">חציית קו אמצע</span>
+                        <span className="text-yellow-500 border-b-2 border-dashed border-yellow-500">שינוי כיוון מוחלט</span>
                         <span className="text-red-500 border-b-2 border-red-500">שבירה / בריחת עין</span>
                     </div>
                 </div>
             );
         }
 
-        // --- האפליקציה ---
         function App() {
             const videoRef = useRef(null);
             const canvasRef = useRef(null);
@@ -217,7 +204,7 @@
             const lastNormPosRef = useRef({ left: 50, right: 50 });
             const currentStimulusPosRef = useRef({ x: 50, y: 50, size: 40 });
 
-            const [metrics, setMetrics] = useState({ ipdPx: 0, ipdMm: 0, leftNorm: 0, rightNorm: 0, jitter: 0 });
+            const [metrics, setMetrics] = useState({ ipdPx: 0, ipdMm: 0, leftNorm: 0, rightNorm: 0, jitter: 0, blinkCount: 0 });
             const [testConfig, setTestConfig] = useState({ 
                 type: 'tracking', color: '#3b82f6', durationSpeed: 2, trackVector: 'horizontal', 
                 acuity: 50, npcSimulateCm: 5 
@@ -266,6 +253,9 @@
                 }
             }, [testState, testConfig.acuity, testConfig.color, getBaseStimulusSizePx]);
 
+            // פונקציית עזר למדידת מרחק בין נקודות MediaPipe (בשביל EAR)
+            const pDist = (p1, p2, w, h) => Math.sqrt(Math.pow((p1.x - p2.x) * w, 2) + Math.pow((p1.y - p2.y) * h, 2));
+
             const onResults = useCallback((results) => {
                 const width = 640; const height = 480;
                 if (canvasRef.current && appStageRef.current === 'calibration') {
@@ -278,48 +268,73 @@
                         window.drawConnectors(ctx, results.multiFaceLandmarks[0], window.FACEMESH_LEFT_IRIS, { color: '#FF3030', lineWidth: 2 });
                     }
                 }
+                
                 if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) return;
                 const lm = results.multiFaceLandmarks[0];
 
-                const rightInnerX = lm[RIGHT_EYE_INNER].x; const rightOuterX = lm[RIGHT_EYE_OUTER].x;
-                const leftInnerX = lm[LEFT_EYE_INNER].x; const leftOuterX = lm[LEFT_EYE_OUTER].x;
-                const rightPupilX = lm[RIGHT_PUPIL].x; const rightPupilY = lm[RIGHT_PUPIL].y;
-                const leftPupilX = lm[LEFT_PUPIL].x; const leftPupilY = lm[LEFT_PUPIL].y;
-
-                const rightNorm = ((rightPupilX - rightInnerX) / (rightOuterX - rightInnerX)) * 100;
-                const leftNorm = ((leftPupilX - leftOuterX) / (leftInnerX - leftOuterX)) * 100;
+                // נקודות בסיס (MediaPipe)
+                const RIGHT_EYE_INNER = 133; const RIGHT_EYE_OUTER = 33;
+                const LEFT_EYE_INNER = 362; const LEFT_EYE_OUTER = 263;
+                const RIGHT_PUPIL = 473; const LEFT_PUPIL = 468;
+                
+                // נרמול אישונים
+                const rightNorm = ((lm[RIGHT_PUPIL].x - lm[RIGHT_EYE_INNER].x) / (lm[RIGHT_EYE_OUTER].x - lm[RIGHT_EYE_INNER].x)) * 100;
+                const leftNorm = ((lm[LEFT_PUPIL].x - lm[LEFT_EYE_OUTER].x) / (lm[LEFT_EYE_INNER].x - lm[LEFT_EYE_OUTER].x)) * 100;
 
                 const deltaLeft = Math.abs(leftNorm - lastNormPosRef.current.left);
                 const deltaRight = Math.abs(rightNorm - lastNormPosRef.current.right);
                 const currentJitter = (deltaLeft + deltaRight) / 2;
                 lastNormPosRef.current = { left: leftNorm, right: rightNorm };
 
-                const dx = (leftPupilX - rightPupilX) * width;
-                const dy = (leftPupilY - rightPupilY) * height;
+                // חישוב IPD (במילימטרים)
+                const dx = (lm[LEFT_PUPIL].x - lm[RIGHT_PUPIL].x) * width;
+                const dy = (lm[LEFT_PUPIL].y - lm[RIGHT_PUPIL].y) * height;
                 const ipdPx = Math.sqrt(dx*dx + dy*dy);
                 const currentMmPerPx = calibData.mmPerPx || 1;
                 const currentIpdMm = ipdPx * currentMmPerPx;
 
-                const rightEyeH = Math.abs(lm[RIGHT_EYE_TOP].y - lm[RIGHT_EYE_BOTTOM].y);
-                const leftEyeH = Math.abs(lm[LEFT_EYE_TOP].y - lm[LEFT_EYE_BOTTOM].y);
+                // --- חישוב EAR לזיהוי מצמוצים מוחלט ---
+                const rightW = pDist(lm[33], lm[133], width, height);
+                const rightH = pDist(lm[159], lm[145], width, height);
+                const rightEAR = rightH / rightW;
+
+                const leftW = pDist(lm[263], lm[362], width, height);
+                const leftH = pDist(lm[386], lm[374], width, height);
+                const leftEAR = leftH / leftW;
+
+                const avgEAR = (rightEAR + leftEAR) / 2;
+                
                 let justBlinked = false;
-                if ((rightEyeH + leftEyeH)/2 < 0.025) {
-                    if (!isBlinkingStateRef.current) { isBlinkingStateRef.current = true; justBlinked = true; }
-                } else { isBlinkingStateRef.current = false; }
+                // סף EAR אוניברסלי שאינו מושפע ממרחק (בד"כ עין פתוחה > 0.25, מצמוץ < 0.18)
+                if (avgEAR < 0.18) {
+                    if (!isBlinkingStateRef.current) { 
+                        isBlinkingStateRef.current = true; 
+                        justBlinked = true; 
+                    }
+                } else { 
+                    isBlinkingStateRef.current = false; 
+                }
 
                 if (isRecordingRef.current && runStartTimeRef.current) {
                     const timeOffset = (Date.now() - runStartTimeRef.current) / 1000;
                     if (justBlinked) currentRunBlinksRef.current.push(timeOffset);
+                    
                     currentRunDataRef.current.push({ 
                         timeOffset, ipd: parseFloat(currentIpdMm.toFixed(1)) || 0, leftNorm: parseFloat(leftNorm.toFixed(1)) || 0, 
                         rightNorm: parseFloat(rightNorm.toFixed(1)) || 0, jitterAvg: parseFloat(currentJitter.toFixed(2)) || 0,
                         blinkStatus: isBlinkingStateRef.current, stimulus: { ...currentStimulusPosRef.current } 
                     });
+                    
                     if (currentRunDataRef.current.length >= MAX_SAMPLES_PER_RUN) {
                         if (isRecordingRef.current) { alert("נעצר עקב הגבלת זיכרון."); handleTestSequence(); }
                     }
                 }
-                setMetrics({ ipdPx: ipdPx.toFixed(1), ipdMm: currentIpdMm.toFixed(1), leftNorm: leftNorm.toFixed(1), rightNorm: rightNorm.toFixed(1), jitter: currentJitter.toFixed(2) });
+                
+                setMetrics({ 
+                    ipdPx: ipdPx.toFixed(1), ipdMm: currentIpdMm.toFixed(1), leftNorm: leftNorm.toFixed(1), 
+                    rightNorm: rightNorm.toFixed(1), jitter: currentJitter.toFixed(2), 
+                    blinkCount: currentRunBlinksRef.current.length 
+                });
             }, [calibData.mmPerPx]);
 
             useEffect(() => {
@@ -406,6 +421,8 @@
                         data: finalData 
                     };
                     setRunLogs(prev => [logEntry, ...prev]);
+                    // איפוס מונה מצמוצים של הממשק הראשי בסיום בדיקה
+                    setMetrics(prev => ({...prev, blinkCount: 0})); 
                 }
             };
 
@@ -413,10 +430,12 @@
                 <div className="h-full w-full bg-slate-900 text-slate-100 font-sans overflow-hidden flex flex-col">
                     <div className="hidden"><video ref={videoRef} playsInline autoPlay muted /></div>
 
+                    {/* --- מסך כיול --- */}
                     <div style={{ display: appStage === 'calibration' ? 'flex' : 'none' }} className="flex-col items-center justify-center h-full p-8 text-center relative z-10 w-full">
-                        <h1 className="text-4xl font-bold text-white mb-2">כיול קליני משולב</h1>
+                        <h1 className="text-4xl font-bold text-white mb-2">כיול קליני משולב (EAR Blinks Ready)</h1>
                         <p className="text-slate-300 mb-6 max-w-3xl text-[15px] leading-relaxed">
-                            התאם את המלבן לכרטיס. תוכל לאשר את המרחק המשוער, או להקליד מרחק מדויק שנמדד.
+                            התאם את המלבן לכרטיס כדי לכייל צפיפות פיקסלים.<br/> 
+                            הכנסת מרחק מדויק תבטיח תצוגה בגודל Snellen מושלם. (זיהוי מצמוצים פועל כעת אוטומטית בכל מרחק).
                         </p>
                         
                         <div className="flex gap-8 items-stretch justify-center w-full max-w-5xl">
@@ -441,7 +460,7 @@
                                         <input type="number" value={manualDistanceCm} onChange={(e) => handleManualDistanceChange(parseInt(e.target.value))} 
                                                className="bg-slate-700 text-white font-mono text-xl p-2 rounded w-24 outline-none focus:border-blue-500 border border-transparent text-center"/>
                                         <div className="text-xs text-slate-500 leading-tight">
-                                            {!isManualDistance ? 'משוערך אוטומטית לפי המצלמה. ניתן לערוך ידנית.' : 'הוזן מרחק ידני קבוע.'}
+                                            {!isManualDistance ? 'משוערך אוטומטית. ניתן לערוך ידנית.' : 'הוזן מרחק קבוע.'}
                                         </div>
                                     </div>
                                 </div>
@@ -453,6 +472,7 @@
                         </div>
                     </div>
 
+                    {/* --- מסך המבדק --- */}
                     <div style={{ display: appStage === 'testing' ? 'flex' : 'none' }} className="flex-col h-full gap-4 p-4 relative z-10 w-full">
                         <header className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center shrink-0 shadow-md">
                             <div>
@@ -463,6 +483,12 @@
                                 </div>
                             </div>
                             <div className="flex gap-4 items-center">
+                                {testState === 'running' && (
+                                    <div className="bg-slate-900 px-3 py-1 rounded border border-slate-700 flex gap-2 items-center mr-4">
+                                        <span className="text-xs text-slate-400">מצמוצים עכשיו:</span>
+                                        <strong className="text-yellow-400 text-lg">{metrics.blinkCount}</strong>
+                                    </div>
+                                )}
                                 {testState === 'countdown' && <span className="text-yellow-400 font-bold animate-pulse">הכן את הנבדק...</span>}
                                 {testState === 'running' && <span className="text-red-400 font-bold animate-pulse">⏺ מקליט נתונים</span>}
                                 <button onClick={handleTestSequence} className={`px-8 py-3 rounded-lg font-bold text-white transition-all shadow-lg ${testState === 'running' ? 'bg-red-500 hover:bg-red-600' : testState === 'countdown' ? 'bg-yellow-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'}`} disabled={testState === 'countdown'}>
@@ -549,6 +575,7 @@
                                                 <div className="h-[180px] w-full bg-black/40 rounded mt-1 border border-slate-700 p-1">
                                                     <RunCharts data={log.data} testType={log.type} isFullscreen={false} />
                                                 </div>
+                                                <div className="text-xs text-slate-400 mt-2 text-right">סה"כ מצמוצים: {log.totalBlinks}</div>
                                             </div>
                                         ))}
                                     </div>
