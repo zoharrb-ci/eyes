@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <title>מערכת אבחון עיניים - V10 (Live Optotype & Manual Distance)</title>
+    <title>מערכת אבחון עיניים - V11 (Advanced Graph Annotations)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -25,10 +25,9 @@
         const RIGHT_EYE_TOP = 159; const RIGHT_EYE_BOTTOM = 145;
         const LEFT_EYE_TOP = 386; const LEFT_EYE_BOTTOM = 374;
         const MAX_SAMPLES_PER_RUN = 15000;
-        
         const CREDIT_CARD_WIDTH_MM = 85.6;
 
-        // --- רכיב הגרפים ---
+        // --- רכיב הגרפים (משודרג עם חישובי קיצון, אמצע ושבירה) ---
         function RunCharts({ data, testType, isFullscreen = false }) {
             const chartRef = useRef(null);
             const chartInstance = useRef(null);
@@ -39,43 +38,91 @@
                 if (chartInstance.current) chartInstance.current.destroy();
 
                 const eventData = new Array(data.length).fill(null);
-                let lastBreakIndex = -100;
+                let lastBreakIndex = -100; // למניעת הצפת סימוני שבירה
 
                 try {
                     for (let i = 1; i < data.length - 1; i++) {
-                        const prev = data[i - 1]?.stimulus; const curr = data[i]?.stimulus; const next = data[i + 1]?.stimulus;
+                        const prev = data[i - 1]?.stimulus; 
+                        const curr = data[i]?.stimulus; 
+                        const next = data[i + 1]?.stimulus;
+                        
                         if (!prev || !curr || !next) continue;
 
-                        if ((prev.x < 50 && curr.x >= 50) || (prev.x > 50 && curr.x <= 50) || (prev.y < 50 && curr.y >= 50) || (prev.y > 50 && curr.y <= 50)) {
-                            eventData[i] = { type: 'midline', color: 'rgba(156, 163, 175, 0.4)', dash: [5, 5], width: 1 };
+                        // 1. חישוב חציית קו אמצע (50%)
+                        if ((prev.x < 50 && curr.x >= 50) || (prev.x > 50 && curr.x <= 50) || 
+                            (prev.y < 50 && curr.y >= 50) || (prev.y > 50 && curr.y <= 50)) {
+                            eventData[i] = { type: 'midline', label: 'אמצע', color: 'rgba(156, 163, 175, 0.7)', dash: [4, 4], width: 1.5 };
                         }
+                        
+                        // 2. חישוב נקודות קיצון - Min/Max (שינוי כיוון נגזרת)
                         const dx1 = curr.x - prev.x; const dx2 = next.x - curr.x;
                         const dy1 = curr.y - prev.y; const dy2 = next.y - curr.y;
+                        
+                        // אם המהירות שינתה סימן - זהו קצה הטווח (Min או Max)
                         if ((dx1 * dx2 < 0) || (dy1 * dy2 < 0)) {
-                            eventData[i] = { type: 'direction', color: 'rgba(234, 179, 8, 0.6)', dash: [2, 2], width: 1 };
+                            eventData[i] = { type: 'direction', label: 'קצה (Min/Max)', color: 'rgba(234, 179, 8, 0.8)', dash: [2, 2], width: 2 };
                         }
+
+                        // 3. חישוב שבירה / בריחת עין
+                        const currentJitter = data[i].jitterAvg || 0;
+                        let isBreak = false;
+                        let breakLabel = '';
+
                         if (testType === 'התכנסות (NPC)') {
                             const ipdJump = (data[i].ipd || 0) - (data[i - 1].ipd || 0);
-                            if ((ipdJump > 1.5 || (data[i].jitterAvg || 0) > 2.0) && (i - lastBreakIndex > 40)) {
-                                eventData[i] = { type: 'break', color: 'rgba(239, 68, 68, 0.9)', dash: [], width: 2 };
-                                lastBreakIndex = i;
+                            if (ipdJump > 1.0) { // קפיצה חדה ב-IPD מעידה על שבירת התכנסות
+                                isBreak = true; breakLabel = 'שבירת התכנסות';
+                            } else if (currentJitter > 2.5) {
+                                isBreak = true; breakLabel = 'בריחת עין (ריצוד)';
                             }
+                        } else {
+                            // במעקב (Tracking) בריחת עין מתבטאת בריצוד חריג (Catch-up Saccade)
+                            if (currentJitter > 2.5) {
+                                isBreak = true; breakLabel = 'בריחת עין (איבוד)';
+                            }
+                        }
+
+                        if (isBreak && (i - lastBreakIndex > 40)) { // מרווח כדי לא לצייר קווים צפופים מדי
+                            eventData[i] = { type: 'break', label: breakLabel, color: 'rgba(239, 68, 68, 1)', dash: [], width: 2.5 };
+                            lastBreakIndex = i;
                         }
                     }
                 } catch (e) { console.error("שגיאה בחישוב אירועי גרף", e); }
 
-                const verticalLinesPlugin = {
-                    id: 'verticalEventLines',
+                // פלאגין משודרג לציור הקווים והטקסט על הגרף
+                const customAnnotationsPlugin = {
+                    id: 'customAnnotations',
                     afterDraw: (chart) => {
                         const ctx = chart.ctx; const xAxis = chart.scales.x;
                         const topY = chart.chartArea.top; const bottomY = chart.chartArea.bottom;
+                        
+                        ctx.font = isFullscreen ? 'bold 12px Arial' : '10px Arial';
+                        ctx.textAlign = 'right';
+
                         eventData.forEach((event, index) => {
                             if (event) {
                                 const xPos = xAxis.getPixelForTick(index);
-                                ctx.save(); ctx.beginPath(); ctx.moveTo(xPos, topY); ctx.lineTo(xPos, bottomY);
+                                
+                                // ציור הקו האנכי
+                                ctx.save(); 
+                                ctx.beginPath(); ctx.moveTo(xPos, topY); ctx.lineTo(xPos, bottomY);
                                 ctx.lineWidth = event.width; ctx.strokeStyle = event.color;
                                 if (event.dash.length > 0) ctx.setLineDash(event.dash);
-                                ctx.stroke(); ctx.restore();
+                                ctx.stroke(); 
+                                
+                                // ציור הטקסט (מדורג גובה כדי למנוע חפיפה בין טקסטים קרובים)
+                                ctx.setLineDash([]);
+                                ctx.fillStyle = event.color.replace(/[\d\.]+\)$/g, '1)'); // צבע מלא לטקסט
+                                const yOffset = topY + 15 + ((index % 3) * 15);
+                                
+                                // ציור רקע חצי שקוף לטקסט לקריאות נוחה
+                                const textWidth = ctx.measureText(event.label).width;
+                                ctx.fillStyle = 'rgba(15, 23, 42, 0.7)';
+                                ctx.fillRect(xPos - textWidth - 6, yOffset - 10, textWidth + 8, 14);
+                                
+                                ctx.fillStyle = event.color.replace(/[\d\.]+\)$/g, '1)');
+                                ctx.fillText(event.label, xPos - 4, yOffset);
+                                ctx.restore();
                             }
                         });
                     }
@@ -94,7 +141,7 @@
                             { label: 'ריצוד (%)', data: jitterData, borderColor: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.1)', borderWidth: 1, yAxisID: 'y1', pointRadius: 0, fill: true, tension: 0.2 }
                         ]
                     },
-                    plugins: [verticalLinesPlugin],
+                    plugins: [customAnnotationsPlugin],
                     options: {
                         responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false },
                         plugins: { legend: { display: isFullscreen } },
@@ -111,10 +158,10 @@
             return (
                 <div className="flex flex-col h-full">
                     <div className="flex-1 relative"><canvas ref={chartRef} style={{ width: '100%', height: '100%' }}></canvas></div>
-                    <div className={`flex flex-wrap gap-3 mt-2 text-xs justify-center ${isFullscreen ? 'text-sm' : ''}`}>
-                        <span className="text-slate-400 border-b border-dashed border-slate-400">חציית אמצע</span>
-                        <span className="text-yellow-500 border-b border-dashed border-yellow-500">שינוי כיוון</span>
-                        {testType === 'התכנסות (NPC)' && <span className="text-red-500 border-b-2 border-red-500 font-bold">שבירת התכנסות</span>}
+                    <div className={`flex flex-wrap gap-4 mt-2 text-xs justify-center ${isFullscreen ? 'text-sm font-bold' : ''}`}>
+                        <span className="text-slate-400 border-b-2 border-dashed border-slate-400">חציית קו אמצע (Mid)</span>
+                        <span className="text-yellow-500 border-b-2 border-dashed border-yellow-500">שינוי כיוון (Min/Max)</span>
+                        <span className="text-red-500 border-b-2 border-red-500">שבירה / בריחת עין</span>
                     </div>
                 </div>
             );
@@ -131,10 +178,9 @@
             const [cameraActive, setCameraActive] = useState(false);
             const [testState, setTestState] = useState('idle');
             
-            // כיול משודרג
             const [calibBoxWidth, setCalibBoxWidth] = useState(100); 
-            const [manualDistanceCm, setManualDistanceCm] = useState(48); // קלט ידני למרחק
-            const [isManualDistance, setIsManualDistance] = useState(false); // דגל שמזהה אם המשתמש הקליד ידנית
+            const [manualDistanceCm, setManualDistanceCm] = useState(48); 
+            const [isManualDistance, setIsManualDistance] = useState(false); 
             const [calibData, setCalibData] = useState({ mmPerPx: 1, distanceCm: 50 }); 
             
             const isRecordingRef = useRef(false);
@@ -172,22 +218,19 @@
             const appStageRef = useRef(appStage);
             useEffect(() => { appStageRef.current = appStage; }, [appStage]);
 
-            // חישוב גודל הגירוי (Snellen Optotype)
             const getBaseStimulusSizePx = useCallback(() => {
                 const distanceMeters = (calibData.distanceCm || 50) / 100;
                 const mUnit = distanceMeters * (testConfig.acuity / 20);
-                const sizeMm = mUnit * 1.45; // גובה של 1.0M במילימטרים
+                const sizeMm = mUnit * 1.45;
                 const sizePx = sizeMm / (calibData.mmPerPx || 1);
                 return { sizePx, sizeMm };
             }, [calibData, testConfig.acuity]);
 
-            // עדכון המדד בתצוגה (מ"מ)
             useEffect(() => {
                 const { sizeMm } = getBaseStimulusSizePx();
                 setCalculatedSizeMm(sizeMm);
             }, [getBaseStimulusSizePx]);
 
-            // תצוגה מקדימה חיה - משנה את גודל הגירוי בזמן אמת כשהמערכת ממתינה!
             useEffect(() => {
                 if (testState === 'idle' && stimulusDivRef.current) {
                     const { sizePx } = getBaseStimulusSizePx();
@@ -253,7 +296,6 @@
                 setMetrics({ ipdPx: ipdPx.toFixed(1), ipdMm: currentIpdMm.toFixed(1), leftNorm: leftNorm.toFixed(1), rightNorm: rightNorm.toFixed(1), jitter: currentJitter.toFixed(2) });
             }, [calibData.mmPerPx]);
 
-            // מנוע האנימציה (רץ רק במצב running)
             useEffect(() => {
                 if (testState !== 'running') {
                     if (animationLoopRef.current) cancelAnimationFrame(animationLoopRef.current);
@@ -273,7 +315,6 @@
                         if (testConfig.trackVector === 'vertical') y = 50 + waveX;
                         if (testConfig.trackVector === 'figure8') { x = 50 + waveX; y = 50 + Math.sin(t * testConfig.durationSpeed * 2) * 20; }
                     } else {
-                        // התקרבות (NPC) - יחס של המרחק המקורי ליעד העצירה
                         const startDistCm = calibData.distanceCm || 50;
                         const endDistCm = testConfig.npcSimulateCm || 5;
                         const maxScale = startDistCm / endDistCm;
@@ -297,27 +338,19 @@
                 return () => cancelAnimationFrame(animationLoopRef.current);
             }, [testState, testConfig, getBaseStimulusSizePx, calibData.distanceCm]);
 
-            // עדכון הסליידר של הכרטיס (מחשב מרחק אוטומטית אם המשתמש לא הקליד ידנית)
             const handleBoxWidthChange = (val) => {
                 setCalibBoxWidth(val);
-                if (!isManualDistance) {
-                    setManualDistanceCm(Math.round(4763 / val));
-                }
+                if (!isManualDistance) { setManualDistanceCm(Math.round(4763 / val)); }
             };
 
             const handleManualDistanceChange = (val) => {
                 setManualDistanceCm(val);
-                setIsManualDistance(true); // נועל את המרחק לעריכה ידנית בלבד
+                setIsManualDistance(true); 
             };
 
             const handleCalibrationDone = () => {
-                // חייבים בכל מקרה צפיפות פיקסלים כדי להמיר למ"מ במציאות
                 const mmPerPixelCalculated = CREDIT_CARD_WIDTH_MM / calibBoxWidth;
-
-                setCalibData({
-                    mmPerPx: mmPerPixelCalculated, 
-                    distanceCm: manualDistanceCm // המרחק שישמש לנוסחת Snellen!
-                });
+                setCalibData({ mmPerPx: mmPerPixelCalculated, distanceCm: manualDistanceCm });
                 setAppStage('testing');
             };
 
@@ -356,15 +389,12 @@
 
                     {/* --- מסך כיול מתקדם --- */}
                     <div style={{ display: appStage === 'calibration' ? 'flex' : 'none' }} className="flex-col items-center justify-center h-full p-8 text-center relative z-10 w-full">
-                        <h1 className="text-4xl font-bold text-white mb-2">כיול קליני משולב (פיקסלים ומרחק)</h1>
+                        <h1 className="text-4xl font-bold text-white mb-2">כיול קליני משולב</h1>
                         <p className="text-slate-300 mb-6 max-w-3xl text-[15px] leading-relaxed">
-                            כדי שגודל הגירוי והמדדים יהיו מדויקים ברמת המילימטר, חובה לכייל את המסך. <br/>
-                            התאם את המלבן לכרטיס (מחשב אוטומטית צפיפות). תוכל לאשר את המרחק המשוער, או להקליד מרחק מדויק שנמדד.
+                            התאם את המלבן לכרטיס. תוכל לאשר את המרחק המשוער, או להקליד מרחק מדויק שנמדד.
                         </p>
                         
                         <div className="flex gap-8 items-stretch justify-center w-full max-w-5xl">
-                            
-                            {/* וידאו כיול כרטיס */}
                             <div className="relative w-[500px] h-[375px] bg-black rounded-xl overflow-hidden border-2 border-slate-700 shadow-xl shrink-0">
                                 {!cameraActive && <div className="absolute inset-0 flex items-center justify-center text-slate-500">מצלמה בטעינה...</div>}
                                 <canvas ref={canvasRef} className="absolute inset-0 w-full h-full transform -scale-x-100" width="640" height="480" />
@@ -374,7 +404,6 @@
                                 </div>
                             </div>
 
-                            {/* לוח בקרה כיול */}
                             <div className="flex-1 bg-slate-800 p-6 rounded-xl border border-slate-700 flex flex-col justify-center gap-6">
                                 <div>
                                     <label className="text-slate-300 font-bold block mb-2 text-sm text-right">1. התאם גודל כרטיס:</label>
@@ -387,7 +416,7 @@
                                         <input type="number" value={manualDistanceCm} onChange={(e) => handleManualDistanceChange(parseInt(e.target.value))} 
                                                className="bg-slate-700 text-white font-mono text-xl p-2 rounded w-24 outline-none focus:border-blue-500 border border-transparent text-center"/>
                                         <div className="text-xs text-slate-500 leading-tight">
-                                            {!isManualDistance ? 'המערכת משערכת מרחק אוטומטית לפי המצלמה. ניתן להקליד כדי לערוך ידנית.' : 'הוזן מרחק ידני קבוע.'}
+                                            {!isManualDistance ? 'משוערך אוטומטית לפי המצלמה. ניתן לערוך ידנית.' : 'הוזן מרחק ידני קבוע.'}
                                         </div>
                                     </div>
                                 </div>
@@ -449,7 +478,6 @@
 
                                     <div className="flex-[2] flex flex-col gap-3">
                                         <div className="flex gap-6 items-center">
-                                            {/* בקרת Snellen (מתעדכן בלייב) */}
                                             <div className="flex-1 flex flex-col gap-1 bg-slate-900 p-2 rounded border border-slate-700 shadow-inner">
                                                 <span className="text-xs text-slate-400 flex justify-between">
                                                     <span>חדות נדרשת:</span>
