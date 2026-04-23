@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <title>מערכת אבחון עיניים - V14 (Complete & Stable)</title>
+    <title>מערכת אבחון עיניים - V15 (Cycles & Export)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -29,7 +29,6 @@
         const MAX_SAMPLES_PER_RUN = 15000;
         const CREDIT_CARD_WIDTH_MM = 85.6;
 
-        // פונקציית עזר לחישוב מרחק גיאומטרי בין שתי נקודות (לצורך זיהוי מצמוץ)
         const pDist = (p1, p2, w, h) => Math.sqrt(Math.pow((p1.x - p2.x) * w, 2) + Math.pow((p1.y - p2.y) * h, 2));
 
         // --- רכיב הגרפים ---
@@ -55,42 +54,42 @@
                         const prev = data[i - 1]?.stimulus;
                         if (!curr || !prev) continue;
 
-                        // 1. חישוב חציית אמצע
+                        // 1. זיהוי חציית קו אמצע מדויק לפי הגירוי
                         if (testType !== 'התכנסות (NPC)') {
                             if ((prev.x <= 50 && curr.x > 50) || (prev.x >= 50 && curr.x < 50) || 
                                 (prev.y <= 50 && curr.y > 50) || (prev.y >= 50 && curr.y < 50)) {
-                                if (i - lastMidlineMark > 15) { 
+                                if (i - lastMidlineMark > 5) { // הקטנו מרווח כדי לתפוס כל מחזור
                                     eventData[i] = { type: 'midline', label: 'חציית אמצע', color: 'rgba(156, 163, 175, 0.7)', dash: [4, 4], width: 1.5 };
                                     lastMidlineMark = i;
                                 }
                             }
                         }
 
-                        // 2. זיהוי נקודות קיצון
+                        // 2. זיהוי קצות מחזור (שינוי כיוון הגירוי)
                         const dx = curr.x - prev.x;
                         const dy = curr.y - prev.y;
                         const dSize = curr.size - prev.size;
                         
                         let isExtremum = false;
 
-                        if (Math.abs(dx) > 0.05) {
+                        if (Math.abs(dx) > 0.01) {
                             const newDir = Math.sign(dx);
                             if (newDir !== currentXDir) { isExtremum = true; currentXDir = newDir; }
                         }
-                        if (Math.abs(dy) > 0.05) {
+                        if (Math.abs(dy) > 0.01) {
                             const newDir = Math.sign(dy);
                             if (newDir !== currentYDir) { isExtremum = true; currentYDir = newDir; }
                         }
-                        if (Math.abs(dSize) > 0.05) {
+                        if (Math.abs(dSize) > 0.01) {
                             const newDir = Math.sign(dSize);
                             if (newDir !== currentSizeDir && testType === 'התכנסות (NPC)') { 
                                 isExtremum = true; currentSizeDir = newDir; 
                             }
                         }
 
-                        if (isExtremum && (i - lastExtremumMark > 15)) {
+                        if (isExtremum && (i - lastExtremumMark > 5)) {
                             if (!eventData[i]) {
-                                eventData[i] = { type: 'direction', label: 'שינוי כיוון', color: 'rgba(234, 179, 8, 0.8)', dash: [2, 2], width: 2 };
+                                eventData[i] = { type: 'direction', label: 'קצה מחזור', color: 'rgba(234, 179, 8, 0.8)', dash: [2, 2], width: 2 };
                                 lastExtremumMark = i;
                             }
                         }
@@ -108,7 +107,7 @@
                             if (currentJitter > 2.5) { isBreak = true; breakLabel = 'איבוד (סאקאדה)'; }
                         }
 
-                        if (isBreak && (i - lastBreakMark > 30)) {
+                        if (isBreak && (i - lastBreakMark > 20)) {
                             eventData[i] = { type: 'break', label: breakLabel, color: 'rgba(239, 68, 68, 1)', dash: [], width: 2.5 };
                             lastBreakMark = i;
                         }
@@ -183,7 +182,7 @@
                     <div className="flex-1 relative"><canvas ref={chartRef} style={{ width: '100%', height: '100%' }}></canvas></div>
                     <div className={`flex flex-wrap gap-4 mt-2 text-xs justify-center ${isFullscreen ? 'text-sm font-bold' : ''}`}>
                         <span className="text-slate-400 border-b-2 border-dashed border-slate-400">חציית קו אמצע</span>
-                        <span className="text-yellow-500 border-b-2 border-dashed border-yellow-500">שינוי כיוון מוחלט</span>
+                        <span className="text-yellow-500 border-b-2 border-dashed border-yellow-500">קצה מחזור הגירוי</span>
                         <span className="text-red-500 border-b-2 border-red-500">שבירה / בריחת עין</span>
                     </div>
                 </div>
@@ -224,7 +223,6 @@
             const [runLogs, setRunLogs] = useState([]);
             const [fullscreenChartData, setFullscreenChartData] = useState(null);
 
-            // הפעלת מצלמה פעם אחת בלבד בעת טעינת האפליקציה
             useEffect(() => {
                 let camera = null; let faceMesh = null;
                 const startTracking = async () => {
@@ -266,7 +264,6 @@
 
             const onResults = useCallback((results) => {
                 const width = 640; const height = 480;
-                // ציור הכיול מתבצע רק כשאנחנו במסך הכיול
                 if (canvasRef.current && appStageRef.current === 'calibration') {
                     const ctx = canvasRef.current.getContext('2d');
                     ctx.clearRect(0, 0, width, height);
@@ -295,26 +292,16 @@
                 const currentMmPerPx = calibData.mmPerPx || 1;
                 const currentIpdMm = ipdPx * currentMmPerPx;
 
-                // חישוב EAR (Eye Aspect Ratio) למצמוצים
                 const rightW = pDist(lm[33], lm[133], width, height);
                 const rightH = pDist(lm[159], lm[145], width, height);
-                const rightEAR = rightH / rightW;
-
                 const leftW = pDist(lm[263], lm[362], width, height);
                 const leftH = pDist(lm[386], lm[374], width, height);
-                const leftEAR = leftH / leftW;
-
-                const avgEAR = (rightEAR + leftEAR) / 2;
+                const avgEAR = ((rightH / rightW) + (leftH / leftW)) / 2;
                 
                 let justBlinked = false;
                 if (avgEAR < 0.18) {
-                    if (!isBlinkingStateRef.current) { 
-                        isBlinkingStateRef.current = true; 
-                        justBlinked = true; 
-                    }
-                } else { 
-                    isBlinkingStateRef.current = false; 
-                }
+                    if (!isBlinkingStateRef.current) { isBlinkingStateRef.current = true; justBlinked = true; }
+                } else { isBlinkingStateRef.current = false; }
 
                 if (isRecordingRef.current && runStartTimeRef.current) {
                     const timeOffset = (Date.now() - runStartTimeRef.current) / 1000;
@@ -333,8 +320,7 @@
                 
                 setMetrics({ 
                     ipdPx: ipdPx.toFixed(1), ipdMm: currentIpdMm.toFixed(1), leftNorm: leftNorm.toFixed(1), 
-                    rightNorm: rightNorm.toFixed(1), jitter: currentJitter.toFixed(2), 
-                    blinkCount: currentRunBlinksRef.current.length 
+                    rightNorm: rightNorm.toFixed(1), jitter: currentJitter.toFixed(2), blinkCount: currentRunBlinksRef.current.length 
                 });
             }, [calibData.mmPerPx]);
 
@@ -424,6 +410,30 @@
                     setRunLogs(prev => [logEntry, ...prev]);
                     setMetrics(prev => ({...prev, blinkCount: 0})); 
                 }
+            };
+
+            // פונקציה לייצוא הנתונים לקובץ CSV
+            const exportToCSV = (log) => {
+                // הוספת BOM כדי שאקסל יזהה את העברית כראוי ב-UTF-8
+                let csvContent = "\uFEFF"; 
+                // כותרות העמודות
+                csvContent += "Time_Seconds,IPD_mm,Left_Eye_Norm_%,Right_Eye_Norm_%,Jitter_%,Stimulus_X_%,Stimulus_Y_%,Stimulus_Size_px\n";
+                
+                log.data.forEach(row => {
+                    const sx = row.stimulus ? row.stimulus.x.toFixed(2) : "";
+                    const sy = row.stimulus ? row.stimulus.y.toFixed(2) : "";
+                    const ssize = row.stimulus ? row.stimulus.size.toFixed(2) : "";
+                    csvContent += `${row.timeOffset.toFixed(3)},${row.ipd},${row.leftNorm},${row.rightNorm},${row.jitterAvg},${sx},${sy},${ssize}\n`;
+                });
+
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.setAttribute("href", url);
+                link.setAttribute("download", `EyeTest_Data_${log.id}.csv`);
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
             };
 
             return (
@@ -570,7 +580,10 @@
                                             <div key={log.id} className="bg-slate-900 border border-slate-600 p-3 rounded-lg flex flex-col shadow-md">
                                                 <div className="flex justify-between items-start mb-2">
                                                     <div><div className="font-bold text-sm text-blue-200">דוח #{runLogs.length - i} - {log.type}</div><div className="text-xs text-slate-400">{log.time} | משך: {log.duration}s</div></div>
-                                                    <button onClick={() => setFullscreenChartData(log)} className="bg-slate-700 hover:bg-slate-600 text-white text-xs px-3 py-1.5 rounded border border-slate-500">🔍 הגדל</button>
+                                                    <div className="flex gap-2">
+                                                        <button onClick={() => exportToCSV(log)} className="bg-green-700 hover:bg-green-600 text-white text-xs px-3 py-1.5 rounded border border-green-500 font-bold">💾 CSV</button>
+                                                        <button onClick={() => setFullscreenChartData(log)} className="bg-slate-700 hover:bg-slate-600 text-white text-xs px-3 py-1.5 rounded border border-slate-500">🔍 הגדל</button>
+                                                    </div>
                                                 </div>
                                                 <div className="h-[180px] w-full bg-black/40 rounded mt-1 border border-slate-700 p-1">
                                                     <RunCharts data={log.data} testType={log.type} isFullscreen={false} />
