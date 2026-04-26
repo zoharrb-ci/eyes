@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <title>מערכת סינון ראייה - V19 (Screening UI)</title>
+    <title>מערכת סינון ראייה - V20 (Web Worker & Angular Velocity)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -10,13 +10,11 @@
     
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
     <style>
         .fade-in { animation: fadeIn 0.3s ease-in-out; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        /* עיצוב פס גלילה מותאם אישית */
         .custom-scrollbar::-webkit-scrollbar { width: 8px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: #1e293b; border-radius: 8px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; border-radius: 8px; }
@@ -27,7 +25,7 @@
     <div id="root" class="h-full w-full"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useRef, useCallback } = React;
+        const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
         const LEFT_PUPIL = 468; const RIGHT_PUPIL = 473;
         const RIGHT_EYE_INNER = 133; const RIGHT_EYE_OUTER = 33;
@@ -54,6 +52,38 @@
             const mean = array.reduce((a, b) => a + b) / array.length;
             return Math.sqrt(array.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b) / array.length);
         };
+
+        // קוד ה-Web Worker שירוץ ברקע ולא יתקע את ה-UI
+        const workerCode = `
+            importScripts('https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js');
+            
+            let faceMesh = new FaceMesh({
+                locateFile: (file) => 'https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/' + file
+            });
+            
+            faceMesh.setOptions({
+                maxNumFaces: 1,
+                refineLandmarks: true,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            faceMesh.onResults((results) => {
+                if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+                    postMessage({ landmarks: results.multiFaceLandmarks[0] });
+                } else {
+                    postMessage({ landmarks: null });
+                }
+            });
+
+            onmessage = async (e) => {
+                if (e.data.image) {
+                    await faceMesh.send({ image: e.data.image });
+                    // שחרור זיכרון ידני חשוב בהעברת ImageBitmap
+                    e.data.image.close(); 
+                }
+            };
+        `;
 
         // --- רכיב הגרפים ---
         function RunCharts({ data, testType, isFullscreen = false }) {
@@ -150,8 +180,11 @@
             const stimulusDivRef = useRef(null);
             const animationLoopRef = useRef(null);
             
+            // Web Worker Refs
+            const workerRef = useRef(null);
+            const latestLandmarksRef = useRef(null);
+
             const [appStage, setAppStage] = useState('home');
-            
             const [cameraActive, setCameraActive] = useState(false);
             const [testState, setTestState] = useState('idle');
             
@@ -170,28 +203,74 @@
             const currentStimulusPosRef = useRef({ x: 50, y: 50, size: 40 });
 
             const [metrics, setMetrics] = useState({ ipdMm: 0, leftNormX: 0, rightNormX: 0, leftNormY: 0, rightNormY: 0, blinkCount: 0 });
-            const [testConfig, setTestConfig] = useState({ type: 'tracking', color: '#3b82f6', durationSpeed: 2, trackVector: 'horizontal', acuity: 50, npcSimulateCm: 5 });
+            const [testConfig, setTestConfig] = useState({ type: 'tracking', color: '#3b82f6', durationSpeed: 0.5, trackVector: 'horizontal', acuity: 40, npcSimulateCm: 5 });
             const [calculatedSizeMm, setCalculatedSizeMm] = useState(0);
 
             const [runLogs, setRunLogs] = useState([]);
             const [fullscreenChartData, setFullscreenChartData] = useState(null);
 
+            // הפעלת מצלמה והקמת Web Worker
             useEffect(() => {
-                let camera = null; let faceMesh = null;
+                // יצירת Web Worker מקוד הסטרינג
+                const blob = new Blob([workerCode], { type: 'application/javascript' });
+                workerRef.current = new Worker(URL.createObjectURL(blob));
+                
+                workerRef.current.onmessage = (e) => {
+                    const lm = e.data.landmarks;
+                    latestLandmarksRef.current = lm; // שומרים בשביל ציור הכיול
+                    if (lm) processLandmarks(lm);
+                };
+
                 const startTracking = async () => {
-                    if (!window.FaceMesh) return;
-                    faceMesh = new window.FaceMesh({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}` });
-                    faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true });
-                    faceMesh.onResults(onResults);
-                    camera = new window.Camera(videoRef.current, { onFrame: async () => { await faceMesh.send({ image: videoRef.current }); }, width: 640, height: 480 });
+                    const camera = new window.Camera(videoRef.current, {
+                        onFrame: async () => {
+                            // 1. ציור מסך הכיול באופן מקומי (הפרדה מה-Worker)
+                            if (appStageRef.current === 'calibration' && canvasRef.current) {
+                                const ctx = canvasRef.current.getContext('2d');
+                                ctx.clearRect(0, 0, 640, 480);
+                                ctx.drawImage(videoRef.current, 0, 0, 640, 480);
+                                if (latestLandmarksRef.current) {
+                                    window.drawConnectors(ctx, latestLandmarksRef.current, window.FACEMESH_TESSELATION, { color: '#C0C0C040', lineWidth: 0.5 });
+                                    window.drawConnectors(ctx, latestLandmarksRef.current, window.FACEMESH_RIGHT_IRIS, { color: '#FF3030', lineWidth: 2 });
+                                    window.drawConnectors(ctx, latestLandmarksRef.current, window.FACEMESH_LEFT_IRIS, { color: '#FF3030', lineWidth: 2 });
+                                }
+                            }
+                            // 2. שליחת הפריים ל-Worker לפענוח מאחורי הקלעים
+                            if (workerRef.current) {
+                                try {
+                                    const bitmap = await createImageBitmap(videoRef.current);
+                                    workerRef.current.postMessage({ image: bitmap }, [bitmap]);
+                                } catch (err) { /* התעלם משגיאות פריימים ריקים בטעינה */ }
+                            }
+                        },
+                        width: 640, height: 480
+                    });
                     await camera.start();
                     setCameraActive(true);
                 };
                 setTimeout(startTracking, 1000);
+
+                return () => { if (workerRef.current) workerRef.current.terminate(); };
             }, []);
 
             const appStageRef = useRef(appStage);
             useEffect(() => { appStageRef.current = appStage; }, [appStage]);
+
+            // חישוב המהירות הזוויתית המשוערת (Angular Velocity) ב-Deg/Sec
+            const angularVelocity = useMemo(() => {
+                if (testConfig.type !== 'tracking') return 0;
+                // אנו מדמים גל סינוס בעל משרעת (Amplitude) של 40% מרוחב המסך (התנועה מ-10% ל-90%)
+                const amplitudePx = window.innerWidth * 0.4;
+                const amplitudeMm = amplitudePx * (calibData.mmPerPx || 1);
+                
+                // V_max של גל סינוס = Amplitude * 2 * Pi * F
+                const maxVelMmSec = amplitudeMm * (2 * Math.PI * testConfig.durationSpeed);
+                const distanceMm = calibData.distanceCm * 10;
+                
+                // המרה למעלות: arctan(V_max / Distance)
+                const maxVelDegSec = Math.atan(maxVelMmSec / distanceMm) * (180 / Math.PI);
+                return maxVelDegSec.toFixed(1);
+            }, [testConfig.durationSpeed, testConfig.type, calibData.mmPerPx, calibData.distanceCm]);
 
             const getBaseStimulusSizePx = useCallback(() => {
                 const distanceMeters = (calibData.distanceCm || 50) / 100;
@@ -206,23 +285,10 @@
                 setCalculatedSizeMm(sizeMm);
             }, [getBaseStimulusSizePx]);
 
-            const onResults = useCallback((results) => {
+            // פונקציית עיבוד הנתונים שנקראת מתוך ה-Worker
+            const processLandmarks = useCallback((lm) => {
                 const width = 640; const height = 480;
                 
-                if (canvasRef.current && appStageRef.current === 'calibration') {
-                    const ctx = canvasRef.current.getContext('2d');
-                    ctx.clearRect(0, 0, width, height);
-                    ctx.drawImage(results.image, 0, 0, width, height);
-                    if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-                        window.drawConnectors(ctx, results.multiFaceLandmarks[0], window.FACEMESH_TESSELATION, { color: '#C0C0C040', lineWidth: 0.5 });
-                        window.drawConnectors(ctx, results.multiFaceLandmarks[0], window.FACEMESH_RIGHT_IRIS, { color: '#FF3030', lineWidth: 2 });
-                        window.drawConnectors(ctx, results.multiFaceLandmarks[0], window.FACEMESH_LEFT_IRIS, { color: '#FF3030', lineWidth: 2 });
-                    }
-                }
-                
-                if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) return;
-                const lm = results.multiFaceLandmarks[0];
-
                 const rightNormX = ((lm[RIGHT_PUPIL].x - lm[RIGHT_EYE_INNER].x) / (lm[RIGHT_EYE_OUTER].x - lm[RIGHT_EYE_INNER].x)) * 100;
                 const leftNormX = ((lm[LEFT_PUPIL].x - lm[LEFT_EYE_OUTER].x) / (lm[LEFT_EYE_INNER].x - lm[LEFT_EYE_OUTER].x)) * 100;
                 const rightNormY = ((lm[RIGHT_PUPIL].y - lm[RIGHT_EYE_TOP].y) / (lm[RIGHT_EYE_BOTTOM].y - lm[RIGHT_EYE_TOP].y)) * 100;
@@ -239,7 +305,6 @@
                 const leftH = pDist(lm[386], lm[374], width, height);
                 const avgEAR = ((rightH / rightW) + (leftH / leftW)) / 2;
                 
-                // חישוב Jitter (על בסיס המרחק האוקלידי של התנועה מפריים לפריים)
                 const deltaLeft = Math.sqrt(Math.pow(leftNormX - lastNormPosRef.current.leftX, 2) + Math.pow(leftNormY - lastNormPosRef.current.leftY, 2));
                 const deltaRight = Math.sqrt(Math.pow(rightNormX - lastNormPosRef.current.rightX, 2) + Math.pow(rightNormY - lastNormPosRef.current.rightY, 2));
                 const currentJitter = (deltaLeft + deltaRight) / 2;
@@ -271,6 +336,7 @@
                 }
             }, [calibData.mmPerPx]);
 
+            // אנימציית הגירוי - כעת חלקה לחלוטין!
             useEffect(() => {
                 if (appStage !== 'testing' || testState !== 'running') {
                     if (animationLoopRef.current) cancelAnimationFrame(animationLoopRef.current);
@@ -285,16 +351,22 @@
                     let x = 50, y = 50, size = baseSizePx;
                     
                     if (testConfig.type === 'tracking') {
-                        const waveX = Math.sin(t * testConfig.durationSpeed) * 40;
-                        if (testConfig.trackVector === 'horizontal') x = 50 + waveX;
-                        if (testConfig.trackVector === 'vertical') y = 50 + waveX;
-                        if (testConfig.trackVector === 'figure8') { x = 50 + waveX; y = 50 + Math.sin(t * testConfig.durationSpeed * 2) * 20; }
+                        // מתמטיקה מתוקנת: תדר מדויק ב-Hz מבוסס על (2 * Pi * F * t)
+                        const wave = Math.sin(t * testConfig.durationSpeed * Math.PI * 2) * 40;
+                        if (testConfig.trackVector === 'horizontal') x = 50 + wave;
+                        if (testConfig.trackVector === 'vertical') y = 50 + wave;
+                        if (testConfig.trackVector === 'figure8') { 
+                            x = 50 + wave; 
+                            y = 50 + Math.sin(t * testConfig.durationSpeed * Math.PI * 2 * 2) * 20; 
+                        }
                     } else if (testConfig.type === 'convergence') {
                         const startDistCm = calibData.distanceCm || 50;
                         const endDistCm = 5; 
                         const maxScale = startDistCm / endDistCm;
                         const maxSizePx = baseSizePx * maxScale;
-                        const scaleCycle = (Math.sin(t * testConfig.durationSpeed) + 1) / 2;
+                        
+                        // מחזור של גדילה וקטנה (התקרבות/התרחקות)
+                        const scaleCycle = (Math.sin(t * testConfig.durationSpeed * Math.PI * 2) + 1) / 2;
                         size = baseSizePx + scaleCycle * (maxSizePx - baseSizePx);
                     }
                     
@@ -380,7 +452,7 @@
                 const url = URL.createObjectURL(blob);
                 const link = document.createElement("a");
                 link.setAttribute("href", url);
-                link.setAttribute("download", `EyeTest_${log.id}.csv`);
+                link.setAttribute("download", `ScreeningTest_${log.id}.csv`);
                 document.body.appendChild(link); link.click(); document.body.removeChild(link);
             };
 
@@ -447,7 +519,7 @@
 
             const renderHome = () => (
                 <div className="flex flex-col items-center justify-center h-full fade-in p-8 relative">
-                    <h1 className="text-5xl font-bold text-white mb-4 tracking-tight text-center">מערכת אבחון וסינון ראייה</h1>
+                    <h1 className="text-5xl font-bold text-white mb-4 tracking-tight text-center">מערכת סינון והערכת ראייה</h1>
                     <p className="text-slate-400 mb-12 text-lg">בחר את הפעולה הרצויה להמשך</p>
                     
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-5xl w-full">
@@ -517,9 +589,12 @@
                             <div>
                                 <h2 className="text-2xl font-bold text-blue-300 mb-6 border-b border-slate-700 pb-2">{testConfig.type === 'tracking' ? 'הגדרות מעקב' : 'הגדרות התכנסות'}</h2>
                                 <div className="space-y-6">
-                                    <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
+                                    <div className="bg-slate-900 p-4 rounded-lg border border-slate-700 relative">
                                         <div className="flex justify-between text-sm mb-2 text-slate-300"><label>גודל גירוי (חדות נדרשת):</label><span className="font-bold text-white">Snellen 20/{testConfig.acuity}</span></div>
                                         <input type="range" min="20" max="200" step="10" value={testConfig.acuity} onChange={e => setTestConfig({...testConfig, acuity: parseInt(e.target.value)})} className="w-full accent-blue-500" />
+                                        <div className="text-[10px] text-slate-500 mt-2 border-t border-slate-700 pt-1">
+                                            * הערה: נבדקים הזקוקים למשקפי קריאה (לדוגמה +1.75D) חייבים להרכיב אותם בבדיקה זו. מומלץ להגדיר חדות 20/30 או 20/40.
+                                        </div>
                                     </div>
                                     {testConfig.type === 'tracking' && (
                                         <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
@@ -530,8 +605,19 @@
                                         </div>
                                     )}
                                     <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
-                                        <div className="flex justify-between text-sm mb-2 text-slate-300"><label>מהירות (Hz):</label><span className="font-bold text-white">{testConfig.durationSpeed}</span></div>
-                                        <input type="range" min="0.5" max="5" step="0.5" value={testConfig.durationSpeed} onChange={e => setTestConfig({...testConfig, durationSpeed: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
+                                        <div className="flex justify-between text-sm mb-2 text-slate-300">
+                                            <label>קצב ומהירות:</label>
+                                            <span className="font-bold text-white text-right">
+                                                {testConfig.durationSpeed} Hz<br/>
+                                                {testConfig.type === 'tracking' && <span className="text-xs text-yellow-400">~{angularVelocity} Deg/Sec</span>}
+                                            </span>
+                                        </div>
+                                        <input type="range" min="0.1" max="2" step="0.1" value={testConfig.durationSpeed} onChange={e => setTestConfig({...testConfig, durationSpeed: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
+                                        {testConfig.type === 'tracking' && (
+                                            <div className="text-[10px] text-slate-500 mt-2 border-t border-slate-700 pt-1">
+                                                * הערה קלינית: במעקבים רציפים (Smooth Pursuit), מומלץ לאתגר את הנבדק באזור ה-10 עד 30 מעלות לשנייה (Deg/Sec).
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             </div>
