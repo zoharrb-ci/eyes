@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <title>מערכת אבחון עיניים - V17 (New UI Dashboard)</title>
+    <title>מערכת סינון ראייה - V19 (Screening UI)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -14,9 +14,13 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
     <style>
-        /* מעבר חלק בין מסכים */
         .fade-in { animation: fadeIn 0.3s ease-in-out; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        /* עיצוב פס גלילה מותאם אישית */
+        .custom-scrollbar::-webkit-scrollbar { width: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #1e293b; border-radius: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; border-radius: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #64748b; }
     </style>
 </head>
 <body class="bg-slate-900 text-slate-100 font-sans h-screen overflow-hidden">
@@ -25,7 +29,6 @@
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
 
-        // --- קבועים ומשתנים גלובליים ---
         const LEFT_PUPIL = 468; const RIGHT_PUPIL = 473;
         const RIGHT_EYE_INNER = 133; const RIGHT_EYE_OUTER = 33;
         const LEFT_EYE_INNER = 362; const LEFT_EYE_OUTER = 263;
@@ -37,7 +40,6 @@
 
         const pDist = (p1, p2, w, h) => Math.sqrt(Math.pow((p1.x - p2.x) * w, 2) + Math.pow((p1.y - p2.y) * h, 2));
 
-        // פונקציות מתמטיות להחלקה ולסטטיסטיקה
         const smoothData = (data, windowSize) => {
             return data.map((_, idx, arr) => {
                 const start = Math.max(0, idx - Math.floor(windowSize / 2));
@@ -148,7 +150,6 @@
             const stimulusDivRef = useRef(null);
             const animationLoopRef = useRef(null);
             
-            // המצבים האפשריים: 'home', 'calibration', 'diagnostics', 'testing', 'data'
             const [appStage, setAppStage] = useState('home');
             
             const [cameraActive, setCameraActive] = useState(false);
@@ -164,18 +165,17 @@
             const currentRunDataRef = useRef([]);
             const currentRunBlinksRef = useRef([]);
             const isBlinkingStateRef = useRef(false);
+            const lastNormPosRef = useRef({ leftX: 0, leftY: 0, rightX: 0, rightY: 0 });
             
             const currentStimulusPosRef = useRef({ x: 50, y: 50, size: 40 });
 
             const [metrics, setMetrics] = useState({ ipdMm: 0, leftNormX: 0, rightNormX: 0, leftNormY: 0, rightNormY: 0, blinkCount: 0 });
-            const [testConfig, setTestConfig] = useState({ 
-                type: 'tracking', color: '#3b82f6', durationSpeed: 2, trackVector: 'horizontal', acuity: 50 
-            });
+            const [testConfig, setTestConfig] = useState({ type: 'tracking', color: '#3b82f6', durationSpeed: 2, trackVector: 'horizontal', acuity: 50, npcSimulateCm: 5 });
+            const [calculatedSizeMm, setCalculatedSizeMm] = useState(0);
 
             const [runLogs, setRunLogs] = useState([]);
             const [fullscreenChartData, setFullscreenChartData] = useState(null);
 
-            // הפעלת מצלמה ברקע
             useEffect(() => {
                 let camera = null; let faceMesh = null;
                 const startTracking = async () => {
@@ -201,11 +201,14 @@
                 return { sizePx, sizeMm };
             }, [calibData, testConfig.acuity]);
 
-            // עיבוד נתוני הפנים מהמצלמה
+            useEffect(() => {
+                const { sizeMm } = getBaseStimulusSizePx();
+                setCalculatedSizeMm(sizeMm);
+            }, [getBaseStimulusSizePx]);
+
             const onResults = useCallback((results) => {
                 const width = 640; const height = 480;
                 
-                // ציור כיול רק כשאנחנו במסך כיול
                 if (canvasRef.current && appStageRef.current === 'calibration') {
                     const ctx = canvasRef.current.getContext('2d');
                     ctx.clearRect(0, 0, width, height);
@@ -236,6 +239,12 @@
                 const leftH = pDist(lm[386], lm[374], width, height);
                 const avgEAR = ((rightH / rightW) + (leftH / leftW)) / 2;
                 
+                // חישוב Jitter (על בסיס המרחק האוקלידי של התנועה מפריים לפריים)
+                const deltaLeft = Math.sqrt(Math.pow(leftNormX - lastNormPosRef.current.leftX, 2) + Math.pow(leftNormY - lastNormPosRef.current.leftY, 2));
+                const deltaRight = Math.sqrt(Math.pow(rightNormX - lastNormPosRef.current.rightX, 2) + Math.pow(rightNormY - lastNormPosRef.current.rightY, 2));
+                const currentJitter = (deltaLeft + deltaRight) / 2;
+                lastNormPosRef.current = { leftX: leftNormX, leftY: leftNormY, rightX: rightNormX, rightY: rightNormY };
+
                 let justBlinked = false;
                 if (avgEAR < 0.18) {
                     if (!isBlinkingStateRef.current) { isBlinkingStateRef.current = true; justBlinked = true; }
@@ -249,11 +258,11 @@
                         timeOffset, ipd: parseFloat(currentIpdMm.toFixed(1)) || 0, 
                         leftNormX: parseFloat(leftNormX.toFixed(2)) || 0, rightNormX: parseFloat(rightNormX.toFixed(2)) || 0, 
                         leftNormY: parseFloat(leftNormY.toFixed(2)) || 0, rightNormY: parseFloat(rightNormY.toFixed(2)) || 0,
+                        jitterAvg: parseFloat(currentJitter.toFixed(2)) || 0,
                         blinkStatus: isBlinkingStateRef.current, stimulus: { ...currentStimulusPosRef.current } 
                     });
                 }
                 
-                // עדכון המדדים רק אם אנחנו במסך בדיקה
                 if (appStageRef.current === 'testing') {
                     setMetrics({ 
                         ipdMm: currentIpdMm.toFixed(1), leftNormX: leftNormX.toFixed(1), rightNormX: rightNormX.toFixed(1), 
@@ -262,7 +271,6 @@
                 }
             }, [calibData.mmPerPx]);
 
-            // אנימציית הגירוי בבדיקה
             useEffect(() => {
                 if (appStage !== 'testing' || testState !== 'running') {
                     if (animationLoopRef.current) cancelAnimationFrame(animationLoopRef.current);
@@ -282,7 +290,6 @@
                         if (testConfig.trackVector === 'vertical') y = 50 + waveX;
                         if (testConfig.trackVector === 'figure8') { x = 50 + waveX; y = 50 + Math.sin(t * testConfig.durationSpeed * 2) * 20; }
                     } else if (testConfig.type === 'convergence') {
-                        // התכנסות - הגירוי גדל כדי לדמות התקרבות לעין (ממרחק כיול ל-5 ס"מ)
                         const startDistCm = calibData.distanceCm || 50;
                         const endDistCm = 5; 
                         const maxScale = startDistCm / endDistCm;
@@ -308,7 +315,7 @@
             const handleCalibrationDone = () => {
                 const mmPerPixelCalculated = CREDIT_CARD_WIDTH_MM / calibBoxWidth;
                 setCalibData({ mmPerPx: mmPerPixelCalculated, distanceCm: manualDistanceCm, isCalibrated: true });
-                setAppStage('home'); // חוזרים למסך הראשי
+                setAppStage('home');
             };
 
             const startTestFlow = () => {
@@ -330,7 +337,7 @@
                         runStartTimeRef.current = Date.now(); isRecordingRef.current = true;
                         setTestState('running');
                     }, 1000);
-                }, 100); // תן ל-DOM להתרנדר קודם
+                }, 100);
             };
 
             const stopTestFlow = () => {
@@ -357,18 +364,16 @@
                 
                 setRunLogs(prev => [logEntry, ...prev]);
                 setMetrics(prev => ({...prev, blinkCount: 0})); 
-                
-                // העברה אוטומטית למסך הנתונים לאחר סיום בדיקה
                 setAppStage('data');
             };
 
             const exportToCSV = (log) => {
                 let csvContent = "\uFEFF"; 
-                csvContent += "Time_Seconds,IPD_mm,Left_Eye_X,Left_Eye_Y,Right_Eye_X,Right_Eye_Y,Disparity,Stimulus_X_%,Stimulus_Y_%,Stimulus_Size_px\n";
+                csvContent += "Time_Seconds,IPD_mm,Left_Eye_X,Left_Eye_Y,Right_Eye_X,Right_Eye_Y,Disparity,Jitter,Stimulus_X_%,Stimulus_Y_%,Stimulus_Size_px\n";
                 
                 log.data.forEach(row => {
                     const disp = Math.sqrt(Math.pow(row.rightNormX - row.leftNormX, 2) + Math.pow(row.rightNormY - row.leftNormY, 2)).toFixed(2);
-                    csvContent += `${row.timeOffset.toFixed(3)},${row.ipd},${row.leftNormX},${row.leftNormY},${row.rightNormX},${row.rightNormY},${disp},${row.stimulus.x.toFixed(2)},${row.stimulus.y.toFixed(2)},${row.stimulus.size.toFixed(2)}\n`;
+                    csvContent += `${row.timeOffset.toFixed(3)},${row.ipd},${row.leftNormX},${row.leftNormY},${row.rightNormX},${row.rightNormY},${disp},${row.jitterAvg},${row.stimulus.x.toFixed(2)},${row.stimulus.y.toFixed(2)},${row.stimulus.size.toFixed(2)}\n`;
                 });
 
                 const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -379,41 +384,102 @@
                 document.body.appendChild(link); link.click(); document.body.removeChild(link);
             };
 
-            // --- רינדור המסכים השונים ---
+            const exportToAI = (log) => {
+                const ipds = log.data.map(d => d.ipd).filter(v => v > 0);
+                const meanIpd = ipds.length ? (ipds.reduce((a,b)=>a+b,0)/ipds.length).toFixed(2) : "0";
+                const maxIpd = ipds.length ? Math.max(...ipds).toFixed(2) : "0";
+                
+                const disparities = log.data.map(d => Math.sqrt(Math.pow(d.rightNormX - d.leftNormX, 2) + Math.pow(d.rightNormY - d.leftNormY, 2)));
+                const maxDisparity = disparities.length ? Math.max(...disparities).toFixed(2) : "0";
+                
+                const jitters = log.data.map(d => d.jitterAvg);
+                const meanJitter = jitters.length ? (jitters.reduce((a,b)=>a+b,0)/jitters.length).toFixed(2) : "0";
+                const maxJitter = jitters.length ? Math.max(...jitters).toFixed(2) : "0";
+
+                const spatialDom = log.stats.rightStd < log.stats.leftStd ? "ימין דומיננטית ויציבה" : "שמאל דומיננטית ויציבה";
+
+                const promptText = `היי! אתה מאבחן נוירו-קוגניטיבי ואופטומטריסט מומחה.
+לפניך נתונים סטטיסטיים ממבדק סינון עיניים בינוקולרי שביצעתי כעת. סוג המבדק: ${log.type}. משך המבדק: ${log.duration} שניות.
+אנא נתח את הנתונים וכתוב דוח אפיון מפורט ומלא בדיוק לפי התבנית הבאה. הסק מסקנות מקצועיות ואופרטיביות מתוך הנתונים הגולמיים שסיפקתי לך.
+
+*** נתונים גולמיים מהמבדק ***
+- ממוצע IPD (מרחק אישונים): ${meanIpd} מ"מ
+- שיא IPD (נקודות חריגות): ${maxIpd} מ"מ
+- ממוצע ריצוד (Jitter): ${meanJitter}% 
+- שיא ריצוד (Micro-fatigue / Catch-up): ${maxJitter}%
+- ממוצע פער מבט (Gaze Disparity): ${log.stats.meanDisparity}
+- שיא פער מבט (Max Disparity): ${maxDisparity}
+- סך מצמוצים שנרשמו: ${log.totalBlinks}
+- יציבות עין שמאל (סטיית תקן): ${log.stats.leftStd}
+- יציבות עין ימין (סטיית תקן): ${log.stats.rightStd}
+
+*** תבנית הדוח הנדרשת ליצירה (דוח אפיון נוירו-קוגניטיבי מורחב) ***
+
+1. תקציר מנהלים (Executive Summary)
+סיכום תמציתי של "פרופיל המשתמש" הקוגניטיבי. ממצא עיקרי וסטטוס כללי.
+
+2. ניתוח חומרה: חוסן ועמידות (Mental Stamina)
+ניתוח יציבות ה-IPD ורמת Jitter. התייחס לזינוקים כ-Micro-fatigue והסבר את משמעותם על קשב ולמידה.
+
+3. ארכיטקטורת למידה: חציית קו אמצע (Bilateral Integration)
+נתח את התקשורת הבין-המיספריאלית על סמך פער המבט (Disparity) והיציבות. התייחס לסנכרון בין העיניים.
+
+4. מוכנות ומיומנויות קריאה (Literacy Readiness)
+נתח את הדיוק הסאקאדי ורמות הריצוד, והסבר את ההשפעה על פענוח טקסט (Decoding).
+
+5. ניתוח פוטנציאל כללי (Cognitive Potential)
+אסטרטגיית פתרון בעיות, והערכת יעילות עיבוד/עומס קוגניטיבי לפי יציבות העיניים.
+
+6. המלצות אופרטיביות (Action Plan)
+המלצות פרקטיות: אימון נוירו-פלסטי, אסטרטגיית למידה מתאימה, וניהול עומסים.
+
+7. אינדקס מדדים טכניים
+הצג בנקודות את: ממוצע IPD, שיא פער מבט, ודומיננטיות מרחבית (${spatialDom}).
+
+אנא כתוב את הדוח כעת בשפה מקצועית ואמפתית.`;
+
+                navigator.clipboard.writeText(promptText).then(() => {
+                    alert('✅ פקודת יצירת הדוח הועתקה ללוח!\n\nפתח כעת את ChatGPT, Claude, או Gemini, והדבק (Ctrl+V) כדי לקבל את הדוח המלא.');
+                }).catch(err => {
+                    alert('שגיאה בהעתקה: ' + err);
+                });
+            };
 
             const renderHome = () => (
-                <div className="flex flex-col items-center justify-center h-full fade-in p-8">
-                    <h1 className="text-5xl font-bold text-white mb-4 tracking-tight text-center">מערכת אבחון עיניים בינוקולרית</h1>
+                <div className="flex flex-col items-center justify-center h-full fade-in p-8 relative">
+                    <h1 className="text-5xl font-bold text-white mb-4 tracking-tight text-center">מערכת אבחון וסינון ראייה</h1>
                     <p className="text-slate-400 mb-12 text-lg">בחר את הפעולה הרצויה להמשך</p>
                     
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-5xl w-full">
                         <button onClick={() => setAppStage('calibration')} className="bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-2xl p-8 flex flex-col items-center gap-4 transition-all hover:scale-105 shadow-xl group">
                             <div className="text-5xl group-hover:text-blue-400 transition-colors">🎯</div>
                             <h2 className="text-2xl font-bold text-white">1. כיול מערכת</h2>
-                            <p className="text-slate-400 text-sm text-center">התאמת המצלמה למרחק וגודל המסך לדיוק מקסימלי. {calibData.isCalibrated && <span className="text-green-400 block mt-2">✓ המערכת מכוילת</span>}</p>
+                            <p className="text-slate-400 text-sm text-center">התאמת המצלמה למרחק וגודל המסך. {calibData.isCalibrated && <span className="text-green-400 block mt-2">✓ המערכת מכוילת</span>}</p>
                         </button>
                         
                         <button onClick={() => setAppStage('diagnostics')} className="bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-2xl p-8 flex flex-col items-center gap-4 transition-all hover:scale-105 shadow-xl group">
                             <div className="text-5xl group-hover:text-blue-400 transition-colors">👁️</div>
-                            <h2 className="text-2xl font-bold text-white">2. אבחונים קליניים</h2>
-                            <p className="text-slate-400 text-sm text-center">בחירה והרצת מבדקים אופטומטריים: מעקבים, התכנסות ועוד.</p>
+                            <h2 className="text-2xl font-bold text-white">2. מבדקים ראשוניים</h2>
+                            <p className="text-slate-400 text-sm text-center">הרצת מבדקי סינון: מעקבים והתכנסות.</p>
                         </button>
 
                         <button onClick={() => setAppStage('data')} className="bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-2xl p-8 flex flex-col items-center gap-4 transition-all hover:scale-105 shadow-xl group">
                             <div className="text-5xl group-hover:text-blue-400 transition-colors">📊</div>
                             <h2 className="text-2xl font-bold text-white">3. מאגר נתונים</h2>
-                            <p className="text-slate-400 text-sm text-center">צפייה בהיסטוריית מבדקים, גרפים בינוקולריים וייצוא נתונים.</p>
+                            <p className="text-slate-400 text-sm text-center">צפייה בהיסטוריית מבדקים והפקת דוחות בינה מלאכותית.</p>
                         </button>
+                    </div>
+
+                    <div className="absolute bottom-6 text-slate-500 text-sm px-4 text-center">
+                        * שימו לב: מערכת זו נועדה לסינון והערכה ראשונית בלבד, ואינה מהווה תחליף לבדיקה רפואית או מקצועית. במידת הצורך יש לפנות לגורם מוסמך.
                     </div>
                 </div>
             );
 
             const renderCalibration = () => (
                 <div className="flex flex-col items-center justify-center h-full p-8 fade-in relative w-full">
-                    <button onClick={() => setAppStage('home')} className="absolute top-8 right-8 text-slate-400 hover:text-white flex items-center gap-2">
-                        <span>חזור לראשי</span> <span>➜</span>
-                    </button>
-                    <h1 className="text-4xl font-bold text-white mb-2">כיול קליני</h1>
+                    <button onClick={() => setAppStage('home')} className="absolute top-8 right-8 text-slate-400 hover:text-white flex items-center gap-2"><span>חזור לראשי</span> <span>➜</span></button>
+                    <h1 className="text-4xl font-bold text-white mb-2">כיול מערכת</h1>
                     <div className="flex gap-8 items-stretch justify-center w-full max-w-5xl mt-6">
                         <div className="relative w-[500px] h-[375px] bg-black rounded-xl overflow-hidden border-2 border-slate-700 shadow-xl shrink-0">
                             {!cameraActive && <div className="absolute inset-0 flex items-center justify-center text-slate-500">מצלמה בטעינה...</div>}
@@ -438,69 +504,38 @@
 
             const renderDiagnosticsMenu = () => (
                 <div className="flex flex-col items-center justify-center h-full p-8 fade-in relative w-full">
-                    <button onClick={() => setAppStage('home')} className="absolute top-8 right-8 text-slate-400 hover:text-white flex items-center gap-2">
-                        <span>חזור לראשי</span> <span>➜</span>
-                    </button>
-                    
-                    <h1 className="text-4xl font-bold text-white mb-8">תפריט אבחונים</h1>
+                    <button onClick={() => setAppStage('home')} className="absolute top-8 right-8 text-slate-400 hover:text-white flex items-center gap-2"><span>חזור לראשי</span> <span>➜</span></button>
+                    <h1 className="text-4xl font-bold text-white mb-8">תפריט מבדקים</h1>
                     
                     <div className="w-full max-w-4xl bg-slate-800 rounded-2xl border border-slate-700 overflow-hidden shadow-2xl flex flex-col md:flex-row min-h-[400px]">
-                        
-                        {/* תפריט צד */}
                         <div className="md:w-1/3 bg-slate-900 border-l border-slate-700 flex flex-col p-4 gap-2">
-                            <button onClick={() => setTestConfig({...testConfig, type: 'tracking'})} 
-                                    className={`p-4 rounded-xl text-right font-bold text-lg transition-colors ${testConfig.type === 'tracking' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800'}`}>
-                                אבחון מעקבים (Tracking)
-                            </button>
-                            <button onClick={() => setTestConfig({...testConfig, type: 'convergence'})} 
-                                    className={`p-4 rounded-xl text-right font-bold text-lg transition-colors ${testConfig.type === 'convergence' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800'}`}>
-                                אבחון התכנסות (NPC)
-                            </button>
+                            <button onClick={() => setTestConfig({...testConfig, type: 'tracking'})} className={`p-4 rounded-xl text-right font-bold text-lg transition-colors ${testConfig.type === 'tracking' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800'}`}>מבדק מעקבים (Tracking)</button>
+                            <button onClick={() => setTestConfig({...testConfig, type: 'convergence'})} className={`p-4 rounded-xl text-right font-bold text-lg transition-colors ${testConfig.type === 'convergence' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800'}`}>מבדק התכנסות (NPC)</button>
                         </div>
 
-                        {/* אזור הגדרות הבדיקה */}
                         <div className="flex-1 p-8 flex flex-col justify-between">
                             <div>
-                                <h2 className="text-2xl font-bold text-blue-300 mb-6 border-b border-slate-700 pb-2">
-                                    {testConfig.type === 'tracking' ? 'הגדרות מעקב' : 'הגדרות התכנסות'}
-                                </h2>
-                                
+                                <h2 className="text-2xl font-bold text-blue-300 mb-6 border-b border-slate-700 pb-2">{testConfig.type === 'tracking' ? 'הגדרות מעקב' : 'הגדרות התכנסות'}</h2>
                                 <div className="space-y-6">
-                                    {/* בורר משותף: גודל גירוי */}
                                     <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
-                                        <div className="flex justify-between text-sm mb-2 text-slate-300">
-                                            <label>גודל גירוי (חדות נדרשת):</label>
-                                            <span className="font-bold text-white">Snellen 20/{testConfig.acuity}</span>
-                                        </div>
+                                        <div className="flex justify-between text-sm mb-2 text-slate-300"><label>גודל גירוי (חדות נדרשת):</label><span className="font-bold text-white">Snellen 20/{testConfig.acuity}</span></div>
                                         <input type="range" min="20" max="200" step="10" value={testConfig.acuity} onChange={e => setTestConfig({...testConfig, acuity: parseInt(e.target.value)})} className="w-full accent-blue-500" />
                                     </div>
-
-                                    {/* בורר ספציפי: סוג מעקב (רק במעקבים) */}
                                     {testConfig.type === 'tracking' && (
                                         <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
                                             <label className="text-sm mb-2 block text-slate-300">סוג מעקב:</label>
-                                            <select value={testConfig.trackVector} onChange={e => setTestConfig({...testConfig, trackVector: e.target.value})} className="bg-slate-800 text-white p-2 rounded outline-none w-full border border-slate-600 focus:border-blue-500">
-                                                <option value="horizontal">אופקי (Horizontal)</option>
-                                                <option value="vertical">אנכי (Vertical)</option>
-                                                <option value="figure8">שמיניה (Figure 8)</option>
+                                            <select value={testConfig.trackVector} onChange={e => setTestConfig({...testConfig, trackVector: e.target.value})} className="bg-slate-800 text-white p-2 rounded outline-none w-full border border-slate-600">
+                                                <option value="horizontal">אופקי</option><option value="vertical">אנכי</option><option value="figure8">שמיניה</option>
                                             </select>
                                         </div>
                                     )}
-
-                                    {/* בורר משותף: מהירות */}
                                     <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
-                                        <div className="flex justify-between text-sm mb-2 text-slate-300">
-                                            <label>מהירות (Hz):</label>
-                                            <span className="font-bold text-white">{testConfig.durationSpeed}</span>
-                                        </div>
+                                        <div className="flex justify-between text-sm mb-2 text-slate-300"><label>מהירות (Hz):</label><span className="font-bold text-white">{testConfig.durationSpeed}</span></div>
                                         <input type="range" min="0.5" max="5" step="0.5" value={testConfig.durationSpeed} onChange={e => setTestConfig({...testConfig, durationSpeed: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
                                     </div>
                                 </div>
                             </div>
-                            
-                            <button onClick={startTestFlow} className="mt-8 bg-green-600 hover:bg-green-500 text-white font-bold text-xl py-4 rounded-xl shadow-lg transition-transform hover:scale-[1.02] w-full">
-                                התחל אבחון
-                            </button>
+                            <button onClick={startTestFlow} className="mt-8 bg-green-600 hover:bg-green-500 text-white font-bold text-xl py-4 rounded-xl shadow-lg transition-transform hover:scale-[1.02] w-full">התחל מבדק</button>
                         </div>
                     </div>
                 </div>
@@ -508,29 +543,22 @@
 
             const renderTesting = () => (
                 <div className="flex-col h-full w-full relative bg-black fade-in flex">
-                    {/* סרגל עליון מינימליסטי לבדיקה */}
                     <header className="absolute top-0 w-full p-4 flex justify-between items-center z-50 pointer-events-none">
                         <div className="flex gap-4">
                             <div className="bg-slate-900/80 backdrop-blur px-4 py-2 rounded-lg border border-slate-700 pointer-events-auto">
-                                <span className="text-xs text-slate-400 block">מצמוצים</span>
-                                <strong className="text-yellow-400 text-xl">{metrics.blinkCount}</strong>
+                                <span className="text-xs text-slate-400 block">מצמוצים</span><strong className="text-yellow-400 text-xl">{metrics.blinkCount}</strong>
                             </div>
                             <div className="bg-slate-900/80 backdrop-blur px-4 py-2 rounded-lg border border-slate-700 pointer-events-auto">
-                                <span className="text-xs text-slate-400 block">IPD (mm)</span>
-                                <strong className="text-white text-xl">{metrics.ipdMm}</strong>
+                                <span className="text-xs text-slate-400 block">IPD (mm)</span><strong className="text-white text-xl">{metrics.ipdMm}</strong>
                             </div>
                         </div>
-                        
                         <div className="pointer-events-auto flex items-center gap-4">
                             {testState === 'countdown' && <span className="text-yellow-400 font-bold text-xl animate-pulse">הכן את הנבדק...</span>}
                             {testState === 'running' && <span className="text-red-500 font-bold text-xl animate-pulse">⏺ מקליט</span>}
-                            <button onClick={stopTestFlow} className="bg-red-600 hover:bg-red-500 text-white px-8 py-3 rounded-lg font-bold shadow-lg" disabled={testState === 'countdown'}>
-                                ⏹ סיים בדיקה
-                            </button>
+                            <button onClick={stopTestFlow} className="bg-red-600 hover:bg-red-500 text-white px-8 py-3 rounded-lg font-bold shadow-lg" disabled={testState === 'countdown'}>⏹ סיים בדיקה</button>
                         </div>
                     </header>
 
-                    {/* קנבס הבדיקה */}
                     <div className="flex-1 relative overflow-hidden cursor-crosshair">
                         <div ref={stimulusDivRef} className={`absolute rounded-full border-2 border-white flex items-center justify-center transform -translate-x-1/2 -translate-y-1/2 shadow-[0_0_15px_rgba(255,255,255,0.4)] ${testState === 'countdown' ? 'animate-ping' : ''}`}
                             style={{ display: 'flex', backgroundColor: testConfig.color, width: '40px', height: '40px', left: '50%', top: '50%' }}>
@@ -544,15 +572,11 @@
                 <div className="flex flex-col h-full p-8 fade-in relative w-full bg-slate-900">
                     <header className="flex justify-between items-center mb-6 border-b border-slate-800 pb-4">
                         <h1 className="text-4xl font-bold text-white">מאגר נתונים ודוחות מורחבים</h1>
-                        <button onClick={() => setAppStage('home')} className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-2 rounded-lg font-bold transition-colors">
-                            חזור למסך ראשי 🏠
-                        </button>
+                        <button onClick={() => setAppStage('home')} className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-2 rounded-lg font-bold transition-colors">חזור למסך ראשי 🏠</button>
                     </header>
 
                     {runLogs.length === 0 ? (
-                        <div className="flex-1 flex items-center justify-center text-slate-500 text-xl">
-                            אין נתונים להצגה. בצע אבחונים תחילה.
-                        </div>
+                        <div className="flex-1 flex items-center justify-center text-slate-500 text-xl">אין נתונים להצגה. בצע מבדקים תחילה.</div>
                     ) : (
                         <div className="flex-1 overflow-y-auto space-y-6 pr-2 custom-scrollbar">
                             {runLogs.map((log, i) => (
@@ -565,16 +589,17 @@
                                                 <span>| זמן: <strong className="text-white">{log.duration}s</strong></span>
                                                 <span>| יציבות שמאל: <strong className="text-blue-400">{log.stats.leftStd}</strong></span>
                                                 <span>| יציבות ימין: <strong className="text-red-400">{log.stats.rightStd}</strong></span>
-                                                <span>| ממוצע פער (Disparity): <strong className="text-purple-400">{log.stats.meanDisparity}</strong></span>
+                                                <span>| ממוצע פער: <strong className="text-purple-400">{log.stats.meanDisparity}</strong></span>
                                             </div>
                                         </div>
-                                        <div className="flex gap-3">
-                                            <button onClick={() => exportToCSV(log)} className="bg-green-700 hover:bg-green-600 text-white px-4 py-2 rounded-lg font-bold shadow flex items-center gap-2">
-                                                <span>💾</span> שמור כ-CSV
+                                        <div className="flex gap-3 flex-col items-end">
+                                            <button onClick={() => exportToAI(log)} className="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded-lg border border-indigo-400 font-bold shadow-md flex items-center gap-2 transition-transform hover:scale-[1.02]">
+                                                🤖 הפק דוח אפיון מורחב (AI)
                                             </button>
-                                            <button onClick={() => setFullscreenChartData(log)} className="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg font-bold shadow flex items-center gap-2">
-                                                <span>🔍</span> הצג במסך מלא
-                                            </button>
+                                            <div className="flex gap-2">
+                                                <button onClick={() => exportToCSV(log)} className="bg-green-700 hover:bg-green-600 text-white text-[11px] px-3 py-1.5 rounded border border-green-500 font-bold">💾 שמור CSV</button>
+                                                <button onClick={() => setFullscreenChartData(log)} className="bg-slate-700 hover:bg-slate-600 text-white text-[11px] px-3 py-1.5 rounded border border-slate-500">🔍 הגדל גרף</button>
+                                            </div>
                                         </div>
                                     </div>
                                     
@@ -586,7 +611,6 @@
                         </div>
                     )}
 
-                    {/* חלון מודאלי להצגת גרף במסך מלא מתוך מסך הנתונים */}
                     {fullscreenChartData && (
                         <div className="fixed inset-0 z-50 bg-slate-900/95 flex flex-col p-8 backdrop-blur-md">
                             <div className="flex justify-between items-center mb-6 border-b border-slate-700 pb-4">
@@ -594,9 +618,7 @@
                                     <h2 className="text-3xl font-bold text-white mb-2">תצוגת גרף מורחבת</h2>
                                     <p className="text-slate-400 text-sm">מבדק: {fullscreenChartData.type}</p>
                                 </div>
-                                <button onClick={() => setFullscreenChartData(null)} className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-bold shadow-lg text-lg">
-                                    סגור ✖
-                                </button>
+                                <button onClick={() => setFullscreenChartData(null)} className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-bold shadow-lg text-lg">סגור ✖</button>
                             </div>
                             <div className="flex-1 bg-black/50 rounded-2xl border border-slate-700 p-6 flex flex-col">
                                 <RunCharts data={fullscreenChartData.data} testType={fullscreenChartData.type} isFullscreen={true} />
@@ -606,11 +628,9 @@
                 </div>
             );
 
-            // ניתוב הרינדור לפי ה-stage
             return (
                 <div className="h-full w-full bg-slate-900 text-slate-100 font-sans overflow-hidden">
                     <div className="hidden"><video ref={videoRef} playsInline autoPlay muted /></div>
-                    
                     {appStage === 'home' && renderHome()}
                     {appStage === 'calibration' && renderCalibration()}
                     {appStage === 'diagnostics' && renderDiagnosticsMenu()}
