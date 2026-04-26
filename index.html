@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <title>מערכת סינון ראייה - V20 (Web Worker & Angular Velocity)</title>
+    <title>מערכת סינון ראייה - V21 (Angular Velocity & Documented Math)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -25,6 +25,35 @@
     <div id="root" class="h-full w-full"></div>
 
     <script type="text/babel">
+        /*
+        =================================================================================================
+                                    תיעוד אסטרטגיות חישוב והצגת נתונים (Math & Logic Strategies)
+        =================================================================================================
+        
+        1. אסטרטגיית זיהוי מצמוצים (EAR - Eye Aspect Ratio):
+           במקום למדוד פיקסלים מוחלטים (שתלויים במרחק מהמצלמה), המערכת מודדת את יחס הממדים של העין.
+           EAR = (גובה העין) / (רוחב העין).
+           כאשר EAR צונח מתחת לסף מסוים (למשל 0.18), הדבר מזוהה כמצמוץ ודאי בכל מרחק.
+
+        2. אסטרטגיית חישוב מהירות זוויתית (Angular Velocity):
+           מטרתנו שהגירוי ינוע במהירות אחידה של 'X מעלות לשנייה', ללא קשר לגודל המסך.
+           - המערכת יודעת מה רוחב התנועה במילימטרים (Amplitude) על בסיס נתוני הכיול.
+           - היא יודעת את מרחק הנבדק מהמסך במילימטרים (D).
+           - מהירות ליניארית מקסימלית של גל סינוס: V_max = Amplitude * 2 * PI * F (כאשר F זה התדר ב-Hz).
+           - המרה למעלות: Deg_Sec = (V_max / D) * (180 / PI) = (Amplitude * 360 * F) / D.
+           מכאן מחולץ התדר (F) הנדרש כדי לייצר את המהירות הזוויתית שהוגדרה ב-Slider.
+
+        3. אסטרטגיית חישוב פער בינוקולרי (Gaze Disparity):
+           ההפרש בסנכרון בין שתי העיניים. מחושב כמרחק האוקלידי (Euclidean Distance) 
+           בין הקואורדינטות המנורמלות של עין ימין לעין שמאל: sqrt((Rx - Lx)^2 + (Ry - Ly)^2).
+
+        4. אסטרטגיית הצגת נתונים (Custom Chart Events):
+           - חציית אמצע: מזוהה כאשר ה-X של הגירוי עצמו עובר את ערך ה-50%.
+           - נקודות קצה (Min/Max): מחושב באמצעות בדיקת נגזרת (Change of Sign). כשההפרש בין 
+             שני פריימים עוקבים של הגירוי משנה סימן (מחיובי לשלילי), מסומן קצה מחזור.
+        =================================================================================================
+        */
+
         const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
         const LEFT_PUPIL = 468; const RIGHT_PUPIL = 473;
@@ -53,7 +82,7 @@
             return Math.sqrt(array.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b) / array.length);
         };
 
-        // קוד ה-Web Worker שירוץ ברקע ולא יתקע את ה-UI
+        // --- Web Worker Logic ---
         const workerCode = `
             importScripts('https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js');
             
@@ -79,7 +108,6 @@
             onmessage = async (e) => {
                 if (e.data.image) {
                     await faceMesh.send({ image: e.data.image });
-                    // שחרור זיכרון ידני חשוב בהעברת ImageBitmap
                     e.data.image.close(); 
                 }
             };
@@ -134,7 +162,7 @@
                             ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)'; ctx.setLineDash([4, 4]); ctx.stroke();
                             if (iter === 0 && isFullscreen) {
                                 ctx.fillStyle = 'rgba(255, 255, 255, 0.7)'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
-                                ctx.fillText('Center Cross', xPos, topY + 10);
+                                ctx.fillText('חציית אמצע', xPos, topY + 10);
                             }
                         });
                         ctx.restore();
@@ -180,7 +208,6 @@
             const stimulusDivRef = useRef(null);
             const animationLoopRef = useRef(null);
             
-            // Web Worker Refs
             const workerRef = useRef(null);
             const latestLandmarksRef = useRef(null);
 
@@ -203,28 +230,32 @@
             const currentStimulusPosRef = useRef({ x: 50, y: 50, size: 40 });
 
             const [metrics, setMetrics] = useState({ ipdMm: 0, leftNormX: 0, rightNormX: 0, leftNormY: 0, rightNormY: 0, blinkCount: 0 });
-            const [testConfig, setTestConfig] = useState({ type: 'tracking', color: '#3b82f6', durationSpeed: 0.5, trackVector: 'horizontal', acuity: 40, npcSimulateCm: 5 });
+            
+            // testConfig מכיל עכשיו targetVelocityDeg (עבור מעקבים) ו-convSpeedHz (עבור התכנסות)
+            const [testConfig, setTestConfig] = useState({ 
+                type: 'tracking', color: '#3b82f6', 
+                targetVelocityDeg: 20, // ברירת מחדל 20 מעלות לשנייה
+                convSpeedHz: 0.5,      // ברירת מחדל להתכנסות
+                trackVector: 'horizontal', acuity: 40 
+            });
             const [calculatedSizeMm, setCalculatedSizeMm] = useState(0);
 
             const [runLogs, setRunLogs] = useState([]);
             const [fullscreenChartData, setFullscreenChartData] = useState(null);
 
-            // הפעלת מצלמה והקמת Web Worker
             useEffect(() => {
-                // יצירת Web Worker מקוד הסטרינג
                 const blob = new Blob([workerCode], { type: 'application/javascript' });
                 workerRef.current = new Worker(URL.createObjectURL(blob));
                 
                 workerRef.current.onmessage = (e) => {
                     const lm = e.data.landmarks;
-                    latestLandmarksRef.current = lm; // שומרים בשביל ציור הכיול
+                    latestLandmarksRef.current = lm; 
                     if (lm) processLandmarks(lm);
                 };
 
                 const startTracking = async () => {
                     const camera = new window.Camera(videoRef.current, {
                         onFrame: async () => {
-                            // 1. ציור מסך הכיול באופן מקומי (הפרדה מה-Worker)
                             if (appStageRef.current === 'calibration' && canvasRef.current) {
                                 const ctx = canvasRef.current.getContext('2d');
                                 ctx.clearRect(0, 0, 640, 480);
@@ -235,12 +266,11 @@
                                     window.drawConnectors(ctx, latestLandmarksRef.current, window.FACEMESH_LEFT_IRIS, { color: '#FF3030', lineWidth: 2 });
                                 }
                             }
-                            // 2. שליחת הפריים ל-Worker לפענוח מאחורי הקלעים
                             if (workerRef.current) {
                                 try {
                                     const bitmap = await createImageBitmap(videoRef.current);
                                     workerRef.current.postMessage({ image: bitmap }, [bitmap]);
-                                } catch (err) { /* התעלם משגיאות פריימים ריקים בטעינה */ }
+                                } catch (err) {}
                             }
                         },
                         width: 640, height: 480
@@ -256,22 +286,7 @@
             const appStageRef = useRef(appStage);
             useEffect(() => { appStageRef.current = appStage; }, [appStage]);
 
-            // חישוב המהירות הזוויתית המשוערת (Angular Velocity) ב-Deg/Sec
-            const angularVelocity = useMemo(() => {
-                if (testConfig.type !== 'tracking') return 0;
-                // אנו מדמים גל סינוס בעל משרעת (Amplitude) של 40% מרוחב המסך (התנועה מ-10% ל-90%)
-                const amplitudePx = window.innerWidth * 0.4;
-                const amplitudeMm = amplitudePx * (calibData.mmPerPx || 1);
-                
-                // V_max של גל סינוס = Amplitude * 2 * Pi * F
-                const maxVelMmSec = amplitudeMm * (2 * Math.PI * testConfig.durationSpeed);
-                const distanceMm = calibData.distanceCm * 10;
-                
-                // המרה למעלות: arctan(V_max / Distance)
-                const maxVelDegSec = Math.atan(maxVelMmSec / distanceMm) * (180 / Math.PI);
-                return maxVelDegSec.toFixed(1);
-            }, [testConfig.durationSpeed, testConfig.type, calibData.mmPerPx, calibData.distanceCm]);
-
+            // חישוב גודל הגירוי (Acuity/Snellen)
             const getBaseStimulusSizePx = useCallback(() => {
                 const distanceMeters = (calibData.distanceCm || 50) / 100;
                 const mUnit = distanceMeters * (testConfig.acuity / 20);
@@ -285,7 +300,6 @@
                 setCalculatedSizeMm(sizeMm);
             }, [getBaseStimulusSizePx]);
 
-            // פונקציית עיבוד הנתונים שנקראת מתוך ה-Worker
             const processLandmarks = useCallback((lm) => {
                 const width = 640; const height = 480;
                 
@@ -336,7 +350,7 @@
                 }
             }, [calibData.mmPerPx]);
 
-            // אנימציית הגירוי - כעת חלקה לחלוטין!
+            // אנימציית הגירוי
             useEffect(() => {
                 if (appStage !== 'testing' || testState !== 'running') {
                     if (animationLoopRef.current) cancelAnimationFrame(animationLoopRef.current);
@@ -346,27 +360,36 @@
                 const startTime = Date.now();
                 const { sizePx: baseSizePx } = getBaseStimulusSizePx();
 
+                // חישוב התדר ההכרחי (Hz) להשגת המהירות הזוויתית המבוקשת (רק במעקבים)
+                let freqHz = 0.5; 
+                if (testConfig.type === 'tracking') {
+                    const amplitudePx = window.innerWidth * 0.4;
+                    const amplitudeMm = amplitudePx * (calibData.mmPerPx || 1);
+                    const distanceMm = (calibData.distanceCm || 50) * 10;
+                    // F = (w_deg * D) / (A * 360)
+                    freqHz = (testConfig.targetVelocityDeg * distanceMm) / (amplitudeMm * 360);
+                } else {
+                    freqHz = testConfig.convSpeedHz;
+                }
+
                 const animate = () => {
                     const t = (Date.now() - startTime) / 1000;
                     let x = 50, y = 50, size = baseSizePx;
                     
                     if (testConfig.type === 'tracking') {
-                        // מתמטיקה מתוקנת: תדר מדויק ב-Hz מבוסס על (2 * Pi * F * t)
-                        const wave = Math.sin(t * testConfig.durationSpeed * Math.PI * 2) * 40;
+                        const wave = Math.sin(t * freqHz * Math.PI * 2) * 40;
                         if (testConfig.trackVector === 'horizontal') x = 50 + wave;
                         if (testConfig.trackVector === 'vertical') y = 50 + wave;
                         if (testConfig.trackVector === 'figure8') { 
                             x = 50 + wave; 
-                            y = 50 + Math.sin(t * testConfig.durationSpeed * Math.PI * 2 * 2) * 20; 
+                            y = 50 + Math.sin(t * freqHz * Math.PI * 2 * 2) * 20; 
                         }
                     } else if (testConfig.type === 'convergence') {
                         const startDistCm = calibData.distanceCm || 50;
                         const endDistCm = 5; 
                         const maxScale = startDistCm / endDistCm;
                         const maxSizePx = baseSizePx * maxScale;
-                        
-                        // מחזור של גדילה וקטנה (התקרבות/התרחקות)
-                        const scaleCycle = (Math.sin(t * testConfig.durationSpeed * Math.PI * 2) + 1) / 2;
+                        const scaleCycle = (Math.sin(t * freqHz * Math.PI * 2) + 1) / 2;
                         size = baseSizePx + scaleCycle * (maxSizePx - baseSizePx);
                     }
                     
@@ -382,7 +405,7 @@
                 };
                 animationLoopRef.current = requestAnimationFrame(animate);
                 return () => cancelAnimationFrame(animationLoopRef.current);
-            }, [testState, appStage, testConfig, getBaseStimulusSizePx, calibData.distanceCm]);
+            }, [testState, appStage, testConfig, getBaseStimulusSizePx, calibData]);
 
             const handleCalibrationDone = () => {
                 const mmPerPixelCalculated = CREDIT_CARD_WIDTH_MM / calibBoxWidth;
@@ -460,14 +483,11 @@
                 const ipds = log.data.map(d => d.ipd).filter(v => v > 0);
                 const meanIpd = ipds.length ? (ipds.reduce((a,b)=>a+b,0)/ipds.length).toFixed(2) : "0";
                 const maxIpd = ipds.length ? Math.max(...ipds).toFixed(2) : "0";
-                
                 const disparities = log.data.map(d => Math.sqrt(Math.pow(d.rightNormX - d.leftNormX, 2) + Math.pow(d.rightNormY - d.leftNormY, 2)));
                 const maxDisparity = disparities.length ? Math.max(...disparities).toFixed(2) : "0";
-                
                 const jitters = log.data.map(d => d.jitterAvg);
                 const meanJitter = jitters.length ? (jitters.reduce((a,b)=>a+b,0)/jitters.length).toFixed(2) : "0";
                 const maxJitter = jitters.length ? Math.max(...jitters).toFixed(2) : "0";
-
                 const spatialDom = log.stats.rightStd < log.stats.leftStd ? "ימין דומיננטית ויציבה" : "שמאל דומיננטית ויציבה";
 
                 const promptText = `היי! אתה מאבחן נוירו-קוגניטיבי ואופטומטריסט מומחה.
@@ -485,36 +505,11 @@
 - יציבות עין שמאל (סטיית תקן): ${log.stats.leftStd}
 - יציבות עין ימין (סטיית תקן): ${log.stats.rightStd}
 
-*** תבנית הדוח הנדרשת ליצירה (דוח אפיון נוירו-קוגניטיבי מורחב) ***
-
-1. תקציר מנהלים (Executive Summary)
-סיכום תמציתי של "פרופיל המשתמש" הקוגניטיבי. ממצא עיקרי וסטטוס כללי.
-
-2. ניתוח חומרה: חוסן ועמידות (Mental Stamina)
-ניתוח יציבות ה-IPD ורמת Jitter. התייחס לזינוקים כ-Micro-fatigue והסבר את משמעותם על קשב ולמידה.
-
-3. ארכיטקטורת למידה: חציית קו אמצע (Bilateral Integration)
-נתח את התקשורת הבין-המיספריאלית על סמך פער המבט (Disparity) והיציבות. התייחס לסנכרון בין העיניים.
-
-4. מוכנות ומיומנויות קריאה (Literacy Readiness)
-נתח את הדיוק הסאקאדי ורמות הריצוד, והסבר את ההשפעה על פענוח טקסט (Decoding).
-
-5. ניתוח פוטנציאל כללי (Cognitive Potential)
-אסטרטגיית פתרון בעיות, והערכת יעילות עיבוד/עומס קוגניטיבי לפי יציבות העיניים.
-
-6. המלצות אופרטיביות (Action Plan)
-המלצות פרקטיות: אימון נוירו-פלסטי, אסטרטגיית למידה מתאימה, וניהול עומסים.
-
-7. אינדקס מדדים טכניים
-הצג בנקודות את: ממוצע IPD, שיא פער מבט, ודומיננטיות מרחבית (${spatialDom}).
-
 אנא כתוב את הדוח כעת בשפה מקצועית ואמפתית.`;
 
                 navigator.clipboard.writeText(promptText).then(() => {
                     alert('✅ פקודת יצירת הדוח הועתקה ללוח!\n\nפתח כעת את ChatGPT, Claude, או Gemini, והדבק (Ctrl+V) כדי לקבל את הדוח המלא.');
-                }).catch(err => {
-                    alert('שגיאה בהעתקה: ' + err);
-                });
+                }).catch(err => { alert('שגיאה בהעתקה: ' + err); });
             };
 
             const renderHome = () => (
@@ -593,32 +588,38 @@
                                         <div className="flex justify-between text-sm mb-2 text-slate-300"><label>גודל גירוי (חדות נדרשת):</label><span className="font-bold text-white">Snellen 20/{testConfig.acuity}</span></div>
                                         <input type="range" min="20" max="200" step="10" value={testConfig.acuity} onChange={e => setTestConfig({...testConfig, acuity: parseInt(e.target.value)})} className="w-full accent-blue-500" />
                                         <div className="text-[10px] text-slate-500 mt-2 border-t border-slate-700 pt-1">
-                                            * הערה: נבדקים הזקוקים למשקפי קריאה (לדוגמה +1.75D) חייבים להרכיב אותם בבדיקה זו. מומלץ להגדיר חדות 20/30 או 20/40.
+                                            * נבדקים הזקוקים למשקפי קריאה (כגון +1.75D) חייבים להרכיבם. מומלץ להגדיר חדות 20/30-20/40.
                                         </div>
                                     </div>
-                                    {testConfig.type === 'tracking' && (
-                                        <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
-                                            <label className="text-sm mb-2 block text-slate-300">סוג מעקב:</label>
-                                            <select value={testConfig.trackVector} onChange={e => setTestConfig({...testConfig, trackVector: e.target.value})} className="bg-slate-800 text-white p-2 rounded outline-none w-full border border-slate-600">
-                                                <option value="horizontal">אופקי</option><option value="vertical">אנכי</option><option value="figure8">שמיניה</option>
-                                            </select>
-                                        </div>
-                                    )}
-                                    <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
-                                        <div className="flex justify-between text-sm mb-2 text-slate-300">
-                                            <label>קצב ומהירות:</label>
-                                            <span className="font-bold text-white text-right">
-                                                {testConfig.durationSpeed} Hz<br/>
-                                                {testConfig.type === 'tracking' && <span className="text-xs text-yellow-400">~{angularVelocity} Deg/Sec</span>}
-                                            </span>
-                                        </div>
-                                        <input type="range" min="0.1" max="2" step="0.1" value={testConfig.durationSpeed} onChange={e => setTestConfig({...testConfig, durationSpeed: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
-                                        {testConfig.type === 'tracking' && (
-                                            <div className="text-[10px] text-slate-500 mt-2 border-t border-slate-700 pt-1">
-                                                * הערה קלינית: במעקבים רציפים (Smooth Pursuit), מומלץ לאתגר את הנבדק באזור ה-10 עד 30 מעלות לשנייה (Deg/Sec).
+                                    
+                                    {testConfig.type === 'tracking' ? (
+                                        <>
+                                            <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
+                                                <label className="text-sm mb-2 block text-slate-300">סוג מעקב:</label>
+                                                <select value={testConfig.trackVector} onChange={e => setTestConfig({...testConfig, trackVector: e.target.value})} className="bg-slate-800 text-white p-2 rounded outline-none w-full border border-slate-600">
+                                                    <option value="horizontal">אופקי</option><option value="vertical">אנכי</option><option value="figure8">שמיניה</option>
+                                                </select>
                                             </div>
-                                        )}
-                                    </div>
+                                            {/* בורר מהירות זוויתית מותאם אישית למעקבים */}
+                                            <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
+                                                <div className="flex justify-between text-sm mb-2 text-slate-300">
+                                                    <label>מהירות זוויתית (מעלות/שנייה):</label>
+                                                    <span className="font-bold text-white">{testConfig.targetVelocityDeg}°/s</span>
+                                                </div>
+                                                <input type="range" min="5" max="50" step="5" value={testConfig.targetVelocityDeg} onChange={e => setTestConfig({...testConfig, targetVelocityDeg: parseInt(e.target.value)})} className="w-full accent-blue-500" />
+                                                <div className="text-[10px] text-slate-500 mt-2 border-t border-slate-700 pt-1">
+                                                    * מומר אוטומטית לתדר (Hz) ע"פ מרחק הנבדק וגודל המסך.
+                                                </div>
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
+                                                <div className="flex justify-between text-sm mb-2 text-slate-300"><label>קצב התקרבות (Hz):</label><span className="font-bold text-white">{testConfig.convSpeedHz}</span></div>
+                                                <input type="range" min="0.1" max="2" step="0.1" value={testConfig.convSpeedHz} onChange={e => setTestConfig({...testConfig, convSpeedHz: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
+                                            </div>
+                                        </>
+                                    )}
                                 </div>
                             </div>
                             <button onClick={startTestFlow} className="mt-8 bg-green-600 hover:bg-green-500 text-white font-bold text-xl py-4 rounded-xl shadow-lg transition-transform hover:scale-[1.02] w-full">התחל מבדק</button>
