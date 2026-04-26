@@ -1,26 +1,721 @@
-const renderCalibration = () => (
-    <div className="flex flex-col items-center justify-center h-full p-8 fade-in relative w-full">
-        {renderSystemStatus()}
-        <button onClick={() => setAppStage('home')} className="absolute top-8 right-8 text-slate-400 hover:text-white flex items-center gap-2"><span>חזור לראשי</span> <span>➜</span></button>
-        <h1 className="text-4xl font-bold text-white mb-2">כיול מערכת</h1>
-        <div className="flex gap-8 items-stretch justify-center w-full max-w-5xl mt-6">
-            <div className="relative w-[500px] h-[375px] bg-black rounded-xl overflow-hidden border-2 border-slate-700 shadow-xl shrink-0">
-                {!systemStatus.cam && <div className="absolute inset-0 flex items-center justify-center text-slate-500">מצלמה בטעינה...</div>}
-                <canvas ref={canvasRef} className="absolute inset-0 w-full h-full transform -scale-x-100" width="640" height="480" />
-                <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 border-4 border-dashed border-blue-500 bg-blue-500/20 transition-all" 
-                     style={{ width: `${calibBoxWidth}px`, height: `${calibBoxWidth * 0.63}px` }}></div>
-            </div>
-            <div className="flex-1 bg-slate-800 p-6 rounded-xl border border-slate-700 flex flex-col justify-center gap-6">
-                <div>
-                    <label className="text-slate-300 font-bold block mb-2 text-sm text-right">1. התאם גודל כרטיס:</label>
-                    <input type="range" min="20" max="350" value={calibBoxWidth} onChange={(e) => {setCalibBoxWidth(parseInt(e.target.value)); if(!isManualDistance) setManualDistanceCm(Math.round(4763 / parseInt(e.target.value)));}} className="w-full accent-blue-500" />
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>מערכת סינון ראייה וקריאה - V27 (Full Fixed Build)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        .fade-in { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .custom-scrollbar::-webkit-scrollbar { width: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #1e293b; border-radius: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; border-radius: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #64748b; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans h-screen overflow-hidden">
+    <div id="root" class="h-full w-full"></div>
+
+    <script type="text/babel">
+        /*
+        =================================================================================================
+                                    תיעוד אסטרטגיות חישוב והצגת נתונים 
+        =================================================================================================
+        
+        1. אסטרטגיית חסכון במשאבים (UI 1Hz Refresh):
+           הנתונים מוקלטים ב~30 הרץ, אך המסך (React State) מתעדכן רק פעם בשנייה (Running Averages).
+           זה מאפשר לאנימציה לרוץ ללא "גמגומים" בחוט הראשי.
+           
+        2. אסטרטגיית זיהוי מצמוצים (EAR): צניחה מתחת ל-0.24 יחס גובה/רוחב = מצמוץ.
+        
+        3. אסטרטגיית קריאה (Saccades): הגירוי לא נע באופן רציף אלא קופץ בין 6 "מילים" בשורה
+           (מצד ימין לשמאל) ע"פ קצב WPM שהוגדר, כדי לדמות תהליך פענוח ופיקסציה של טקסט.
+        =================================================================================================
+        */
+
+        const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+        const LEFT_PUPIL = 468; const RIGHT_PUPIL = 473;
+        const RIGHT_EYE_INNER = 133; const RIGHT_EYE_OUTER = 33;
+        const LEFT_EYE_INNER = 362; const LEFT_EYE_OUTER = 263;
+        const RIGHT_EYE_TOP = 159; const RIGHT_EYE_BOTTOM = 145;
+        const LEFT_EYE_TOP = 386; const LEFT_EYE_BOTTOM = 374;
+        
+        const MAX_SAMPLES_PER_RUN = 15000;
+        const CREDIT_CARD_WIDTH_MM = 85.6;
+
+        const pDist = (p1, p2, w, h) => Math.sqrt(Math.pow((p1.x - p2.x) * w, 2) + Math.pow((p1.y - p2.y) * h, 2));
+
+        const smoothData = (data, windowSize) => {
+            return data.map((_, idx, arr) => {
+                const start = Math.max(0, idx - Math.floor(windowSize / 2));
+                const end = Math.min(arr.length, idx + Math.floor(windowSize / 2) + 1);
+                const slice = arr.slice(start, end);
+                return slice.reduce((a, b) => a + b, 0) / slice.length;
+            });
+        };
+
+        const getStdDev = (array) => {
+            if (array.length === 0) return 0;
+            const mean = array.reduce((a, b) => a + b) / array.length;
+            return Math.sqrt(array.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b) / array.length);
+        };
+
+        // --- רכיב הגרפים ---
+        function RunCharts({ data, testType, isFullscreen = false }) {
+            const chart1Ref = useRef(null); const chart2Ref = useRef(null);
+            const chart1Instance = useRef(null); const chart2Instance = useRef(null);
+
+            useEffect(() => {
+                if (!chart1Ref.current || !chart2Ref.current || !data || data.length === 0) return;
+                const ctx1 = chart1Ref.current.getContext('2d'); const ctx2 = chart2Ref.current.getContext('2d');
+                if (chart1Instance.current) chart1Instance.current.destroy();
+                if (chart2Instance.current) chart2Instance.current.destroy();
+
+                const windowSize = 30;
+                const timeLabels = data.map(d => d.timeOffset.toFixed(1) + 's');
+                const rawLeftX = data.map(d => d.leftNormX); const rawRightX = data.map(d => d.rightNormX);
+                const rawLeftY = data.map(d => d.leftNormY); const rawRightY = data.map(d => d.rightNormY);
+                const stimulusX = data.map(d => d.stimulus.x);
+
+                const smoothLeftX = smoothData(rawLeftX, windowSize); const smoothRightX = smoothData(rawRightX, windowSize);
+                const disparities = data.map((d, i) => Math.sqrt(Math.pow(rawRightX[i] - rawLeftX[i], 2) + Math.pow(rawRightY[i] - rawLeftY[i], 2)));
+                const smoothDisparity = smoothData(disparities, windowSize);
+
+                const centerCrossings = [];
+                for (let i = 1; i < stimulusX.length; i++) {
+                    if ((stimulusX[i-1] <= 50 && stimulusX[i] > 50) || (stimulusX[i-1] >= 50 && stimulusX[i] < 50)) { centerCrossings.push(i); }
+                }
+
+                const verticalLinePlugin = {
+                    id: 'verticalLines',
+                    afterDraw: (chart) => {
+                        const ctx = chart.ctx; const xAxis = chart.scales.x;
+                        const topY = chart.chartArea.top; const bottomY = chart.chartArea.bottom;
+                        ctx.save();
+                        centerCrossings.forEach((idx, iter) => {
+                            const xPos = xAxis.getPixelForTick(idx);
+                            ctx.beginPath(); ctx.moveTo(xPos, topY); ctx.lineTo(xPos, bottomY);
+                            ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)'; ctx.setLineDash([4, 4]); ctx.stroke();
+                        });
+                        ctx.restore();
+                    }
+                };
+
+                chart1Instance.current = new window.Chart(ctx1, {
+                    type: 'line',
+                    data: {
+                        labels: timeLabels,
+                        datasets: [
+                            { label: 'עין שמאל (X)', data: smoothLeftX, borderColor: '#3b82f6', borderWidth: 2, pointRadius: 0, tension: 0.1 },
+                            { label: 'עין ימין (X)', data: smoothRightX, borderColor: '#ef4444', borderWidth: 2, pointRadius: 0, tension: 0.1 },
+                            { label: 'גירוי (Stimulus)', data: stimulusX, borderColor: 'rgba(156, 163, 175, 0.7)', borderWidth: 2, borderDash: testType==='reading'?[0,0]:[5, 5], pointRadius: 0, tension: 0, stepped: testType === 'reading' }
+                        ]
+                    },
+                    plugins: [verticalLinePlugin],
+                    options: { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: isFullscreen, labels: {color: 'white'} } }, scales: { x: { display: false }, y: { ticks: {color: '#94a3b8'} } } }
+                });
+
+                chart2Instance.current = new window.Chart(ctx2, {
+                    type: 'line',
+                    data: { labels: timeLabels, datasets: [{ label: 'פער בינוקולרי (Disparity)', data: smoothDisparity, borderColor: '#a855f7', backgroundColor: 'rgba(168, 85, 247, 0.1)', borderWidth: 2, pointRadius: 0, fill: true, tension: 0.2 }] },
+                    plugins: [verticalLinePlugin],
+                    options: { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: isFullscreen, labels: {color: 'white'} } }, scales: { x: { ticks: { color: '#94a3b8', maxTicksLimit: isFullscreen ? 20 : 8 } }, y: { ticks: {color: '#94a3b8'}, beginAtZero: true } } }
+                });
+
+                return () => { if (chart1Instance.current) chart1Instance.current.destroy(); if (chart2Instance.current) chart2Instance.current.destroy(); };
+            }, [data, testType, isFullscreen]);
+
+            return (
+                <div className="flex flex-col h-full gap-2">
+                    <div className="flex-1 relative"><canvas ref={chart1Ref} style={{ width: '100%', height: '100%' }}></canvas></div>
+                    <div className="flex-1 relative"><canvas ref={chart2Ref} style={{ width: '100%', height: '100%' }}></canvas></div>
                 </div>
-                <div className="bg-slate-900 p-4 rounded-lg border border-slate-700 text-right">
-                    <label className="text-slate-300 font-bold block mb-2 text-sm text-right">2. מרחק מהמסך (ס"מ):</label>
-                    <input type="number" value={manualDistanceCm} onChange={(e) => {setManualDistanceCm(parseInt(e.target.value)); setIsManualDistance(true);}} className="bg-slate-700 text-white font-mono text-xl p-2 rounded w-24 outline-none focus:border-blue-500 text-center"/>
+            );
+        }
+
+        // --- האפליקציה המרכזית ---
+        function App() {
+            const videoRef = useRef(null); const canvasRef = useRef(null);
+            const stimulusDivRef = useRef(null); const animationLoopRef = useRef(null);
+
+            const [appStage, setAppStage] = useState('home');
+            const [testState, setTestState] = useState('idle');
+            
+            const [systemStatus, setSystemStatus] = useState({ cam: false, face: false });
+            
+            const [calibBoxWidth, setCalibBoxWidth] = useState(100); 
+            const [manualDistanceCm, setManualDistanceCm] = useState(48); 
+            const [isManualDistance, setIsManualDistance] = useState(false); 
+            const [calibData, setCalibData] = useState({ mmPerPx: 1, distanceCm: 50, isCalibrated: false }); 
+            
+            const isRecordingRef = useRef(false);
+            const runStartTimeRef = useRef(null);
+            const currentRunDataRef = useRef([]);
+            const currentRunBlinksRef = useRef([]);
+            const isBlinkingStateRef = useRef(false);
+            const lastNormPosRef = useRef({ leftX: 0, leftY: 0, rightX: 0, rightY: 0 });
+            
+            const uiFrameCountRef = useRef(0); 
+            const lastUiUpdateTimeRef = useRef(Date.now()); 
+            
+            const currentStimulusPosRef = useRef({ x: 50, y: 50, size: 40 });
+
+            const [metrics, setMetrics] = useState({ avgIpd: 0, avgJitter: 0, blinkCount: 0, dataPoints: 0 });
+            
+            const [testConfig, setTestConfig] = useState({ 
+                type: 'reading', color: '#3b82f6', targetVelocityDeg: 20, convSpeedHz: 0.5, readingWpm: 120, trackVector: 'horizontal', acuity: 40 
+            });
+            const [calculatedSizeMm, setCalculatedSizeMm] = useState(0);
+            const [runLogs, setRunLogs] = useState([]);
+            const [fullscreenChartData, setFullscreenChartData] = useState(null);
+
+            const appStageRef = useRef(appStage); useEffect(() => { appStageRef.current = appStage; }, [appStage]);
+            const calibDataRef = useRef(calibData); useEffect(() => { calibDataRef.current = calibData; }, [calibData]);
+
+            useEffect(() => {
+                let camera = null; let faceMesh = null;
+                const startTracking = async () => {
+                    if (!window.FaceMesh) return;
+                    faceMesh = new window.FaceMesh({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}` });
+                    faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+                    faceMesh.onResults(onResults);
+                    
+                    camera = new window.Camera(videoRef.current, {
+                        onFrame: async () => { if (videoRef.current) await faceMesh.send({ image: videoRef.current }); },
+                        width: 640, height: 480
+                    });
+                    
+                    await camera.start();
+                    setSystemStatus(prev => ({...prev, cam: true}));
+                };
+                setTimeout(startTracking, 1000);
+            }, []);
+
+            const angularVelocity = useMemo(() => {
+                if (testConfig.type !== 'tracking') return 0;
+                return testConfig.targetVelocityDeg.toFixed(1);
+            }, [testConfig.targetVelocityDeg]);
+
+            const getBaseStimulusSizePx = useCallback(() => {
+                const distanceMeters = (calibData.distanceCm || 50) / 100;
+                const mUnit = distanceMeters * (testConfig.acuity / 20);
+                const sizeMm = mUnit * 1.45;
+                const sizePx = sizeMm / (calibData.mmPerPx || 1);
+                return { sizePx, sizeMm };
+            }, [calibData, testConfig.acuity]);
+
+            useEffect(() => {
+                const { sizeMm } = getBaseStimulusSizePx(); setCalculatedSizeMm(sizeMm);
+            }, [getBaseStimulusSizePx]);
+
+            const onResults = useCallback((results) => {
+                const width = 640; const height = 480;
+                const hasFace = results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0;
+                
+                if (appStageRef.current === 'calibration' && canvasRef.current) {
+                    const ctx = canvasRef.current.getContext('2d');
+                    ctx.clearRect(0, 0, width, height);
+                    ctx.drawImage(results.image, 0, 0, width, height);
+                    if (hasFace) {
+                        window.drawConnectors(ctx, results.multiFaceLandmarks[0], window.FACEMESH_TESSELATION, { color: '#C0C0C040', lineWidth: 0.5 });
+                        window.drawConnectors(ctx, results.multiFaceLandmarks[0], window.FACEMESH_RIGHT_IRIS, { color: '#FF3030', lineWidth: 2 });
+                        window.drawConnectors(ctx, results.multiFaceLandmarks[0], window.FACEMESH_LEFT_IRIS, { color: '#FF3030', lineWidth: 2 });
+                    }
+                }
+
+                uiFrameCountRef.current++;
+                if (appStageRef.current !== 'testing' && uiFrameCountRef.current % 15 === 0) {
+                    setSystemStatus(prev => ({...prev, face: hasFace}));
+                }
+
+                if (!hasFace) return;
+                const lm = results.multiFaceLandmarks[0];
+
+                const rightNormX = ((lm[RIGHT_PUPIL].x - lm[RIGHT_EYE_INNER].x) / (lm[RIGHT_EYE_OUTER].x - lm[RIGHT_EYE_INNER].x)) * 100;
+                const leftNormX = ((lm[LEFT_PUPIL].x - lm[LEFT_EYE_OUTER].x) / (lm[LEFT_EYE_INNER].x - lm[LEFT_EYE_OUTER].x)) * 100;
+                const rightNormY = ((lm[RIGHT_PUPIL].y - lm[RIGHT_EYE_TOP].y) / (lm[RIGHT_EYE_BOTTOM].y - lm[RIGHT_EYE_TOP].y)) * 100;
+                const leftNormY = ((lm[LEFT_PUPIL].y - lm[LEFT_EYE_TOP].y) / (lm[LEFT_EYE_BOTTOM].y - lm[LEFT_EYE_TOP].y)) * 100;
+
+                const dx = (lm[LEFT_PUPIL].x - lm[RIGHT_PUPIL].x) * width;
+                const dy = (lm[LEFT_PUPIL].y - lm[RIGHT_PUPIL].y) * height;
+                const ipdPx = Math.sqrt(dx*dx + dy*dy);
+                const currentIpdMm = ipdPx * (calibDataRef.current.mmPerPx || 1);
+
+                const rightW = pDist(lm[33], lm[133], width, height); const rightH = pDist(lm[159], lm[145], width, height);
+                const leftW = pDist(lm[263], lm[362], width, height); const leftH = pDist(lm[386], lm[374], width, height);
+                const avgEAR = ((rightH / rightW) + (leftH / leftW)) / 2;
+                
+                const deltaLeft = Math.sqrt(Math.pow(leftNormX - lastNormPosRef.current.leftX, 2) + Math.pow(leftNormY - lastNormPosRef.current.leftY, 2));
+                const deltaRight = Math.sqrt(Math.pow(rightNormX - lastNormPosRef.current.rightX, 2) + Math.pow(rightNormY - lastNormPosRef.current.rightY, 2));
+                const currentJitter = (deltaLeft + deltaRight) / 2;
+                lastNormPosRef.current = { leftX: leftNormX, leftY: leftNormY, rightX: rightNormX, rightY: rightNormY };
+
+                let justBlinked = false;
+                if (avgEAR < 0.24) {
+                    if (!isBlinkingStateRef.current) { isBlinkingStateRef.current = true; justBlinked = true; }
+                } else { isBlinkingStateRef.current = false; }
+
+                if (isRecordingRef.current && runStartTimeRef.current) {
+                    const timeOffset = (Date.now() - runStartTimeRef.current) / 1000;
+                    if (justBlinked) currentRunBlinksRef.current.push(timeOffset);
+                    
+                    currentRunDataRef.current.push({ 
+                        timeOffset, ipd: parseFloat(currentIpdMm.toFixed(1)) || 0, 
+                        leftNormX: parseFloat(leftNormX.toFixed(2)) || 0, rightNormX: parseFloat(rightNormX.toFixed(2)) || 0, 
+                        leftNormY: parseFloat(leftNormY.toFixed(2)) || 0, rightNormY: parseFloat(rightNormY.toFixed(2)) || 0,
+                        jitterAvg: parseFloat(currentJitter.toFixed(2)) || 0,
+                        blinkStatus: isBlinkingStateRef.current, stimulus: { ...currentStimulusPosRef.current } 
+                    });
+
+                    const now = Date.now();
+                    if (appStageRef.current === 'testing' && (now - lastUiUpdateTimeRef.current >= 1000)) {
+                        const dataLength = currentRunDataRef.current.length;
+                        if (dataLength > 0) {
+                            let sumIpd = 0; let sumJitter = 0;
+                            currentRunDataRef.current.forEach(d => { sumIpd += d.ipd; sumJitter += d.jitterAvg; });
+                            setMetrics({
+                                avgIpd: (sumIpd / dataLength).toFixed(1), avgJitter: (sumJitter / dataLength).toFixed(2),
+                                blinkCount: currentRunBlinksRef.current.length, dataPoints: dataLength
+                            });
+                        }
+                        lastUiUpdateTimeRef.current = now;
+                    }
+                }
+            }, []);
+
+            useEffect(() => {
+                if (appStage !== 'testing' || testState !== 'running') {
+                    if (animationLoopRef.current) cancelAnimationFrame(animationLoopRef.current);
+                    return;
+                }
+                
+                const startTime = Date.now();
+                const { sizePx: baseSizePx } = getBaseStimulusSizePx();
+
+                let freqHz = 0.5; 
+                if (testConfig.type === 'tracking') {
+                    const amplitudePx = window.innerWidth * 0.4;
+                    const amplitudeMm = amplitudePx * (calibData.mmPerPx || 1);
+                    const distanceMm = (calibData.distanceCm || 50) * 10;
+                    freqHz = (testConfig.targetVelocityDeg * distanceMm) / (amplitudeMm * 360);
+                }
+
+                const animate = () => {
+                    const timeInMs = Date.now() - startTime;
+                    const t = timeInMs / 1000;
+                    let x = 50, y = 50, size = baseSizePx;
+                    
+                    if (testConfig.type === 'reading') {
+                        const msPerWord = (60 / testConfig.readingWpm) * 1000;
+                        const wordsPerLine = 6; const totalLines = 5;
+                        const totalWordsRead = Math.floor(timeInMs / msPerWord);
+                        const lineIndex = Math.floor(totalWordsRead / wordsPerLine) % totalLines;
+                        const wordOnLine = totalWordsRead % wordsPerLine;
+                        
+                        x = 85 - (wordOnLine * (70 / (wordsPerLine - 1)));
+                        y = 20 + (lineIndex * (60 / (totalLines - 1)));
+                    } else if (testConfig.type === 'tracking') {
+                        const wave = Math.sin(t * freqHz * Math.PI * 2) * 40;
+                        if (testConfig.trackVector === 'horizontal') x = 50 + wave;
+                        if (testConfig.trackVector === 'vertical') y = 50 + wave;
+                        if (testConfig.trackVector === 'figure8') { 
+                            x = 50 + wave; y = 50 + Math.sin(t * freqHz * Math.PI * 2 * 2) * 20; 
+                        }
+                    } else if (testConfig.type === 'convergence') {
+                        const maxScale = (calibData.distanceCm || 50) / 5;
+                        const maxSizePx = baseSizePx * maxScale;
+                        const scaleCycle = (Math.sin(t * testConfig.convSpeedHz * Math.PI * 2) + 1) / 2;
+                        size = baseSizePx + scaleCycle * (maxSizePx - baseSizePx);
+                    }
+                    
+                    currentStimulusPosRef.current = { x, y, size };
+                    
+                    if (stimulusDivRef.current) {
+                        stimulusDivRef.current.style.left = `${x}%`; stimulusDivRef.current.style.top = `${y}%`;
+                        stimulusDivRef.current.style.width = `${size}px`; stimulusDivRef.current.style.height = `${size}px`;
+                    }
+                    animationLoopRef.current = requestAnimationFrame(animate);
+                };
+                animationLoopRef.current = requestAnimationFrame(animate);
+                return () => cancelAnimationFrame(animationLoopRef.current);
+            }, [testState, appStage, testConfig, getBaseStimulusSizePx, calibData]);
+
+            const handleCalibrationDone = () => {
+                const mmPerPixelCalculated = CREDIT_CARD_WIDTH_MM / calibBoxWidth;
+                setCalibData({ mmPerPx: mmPerPixelCalculated, distanceCm: manualDistanceCm, isCalibrated: true });
+                setAppStage('home');
+            };
+
+            const startTestFlow = () => {
+                if (!calibData.isCalibrated) { alert("נא לבצע כיול מערכת תחילה!"); return; }
+                setAppStage('testing'); setTestState('countdown');
+                setMetrics({ avgIpd: 0, avgJitter: 0, blinkCount: 0, dataPoints: 0 }); 
+                
+                setTimeout(() => {
+                    if(stimulusDivRef.current) {
+                        const { sizePx } = getBaseStimulusSizePx();
+                        if(testConfig.type === 'reading') { stimulusDivRef.current.style.left = '85%'; stimulusDivRef.current.style.top = '20%'; } 
+                        else { stimulusDivRef.current.style.left = '50%'; stimulusDivRef.current.style.top = '50%'; }
+                        stimulusDivRef.current.style.width = `${sizePx}px`; stimulusDivRef.current.style.height = `${sizePx}px`;
+                    }
+                    setTimeout(() => {
+                        currentRunDataRef.current = []; currentRunBlinksRef.current = [];
+                        runStartTimeRef.current = Date.now(); isRecordingRef.current = true;
+                        setTestState('running');
+                    }, 1000);
+                }, 100);
+            };
+
+            const stopTestFlow = () => {
+                isRecordingRef.current = false; setTestState('idle');
+                
+                const duration = (Date.now() - runStartTimeRef.current) / 1000;
+                const finalData = JSON.parse(JSON.stringify(currentRunDataRef.current));
+                
+                const leftXRaw = finalData.map(d => d.leftNormX); const rightXRaw = finalData.map(d => d.rightNormX);
+                const disparities = finalData.map(d => Math.sqrt(Math.pow(d.rightNormX - d.leftNormX, 2) + Math.pow(d.rightNormY - d.leftNormY, 2)));
+                
+                const leftStd = getStdDev(leftXRaw); const rightStd = getStdDev(rightXRaw);
+                const meanDisparity = disparities.length ? disparities.reduce((a,b)=>a+b)/disparities.length : 0;
+                const testName = testConfig.type === 'reading' ? 'קריאה (Saccades)' : testConfig.type === 'tracking' ? 'מעקב רציף' : 'התכנסות (NPC)';
+
+                const logEntry = {
+                    id: Date.now(), time: new Date().toLocaleTimeString(), type: testName,
+                    config: testConfig,
+                    duration: duration.toFixed(1), totalBlinks: currentRunBlinksRef.current.length,
+                    stats: { leftStd: leftStd.toFixed(2), rightStd: rightStd.toFixed(2), meanDisparity: meanDisparity.toFixed(2) },
+                    data: finalData 
+                };
+                
+                setRunLogs(prev => [logEntry, ...prev]);
+                setAppStage('data');
+            };
+
+            const exportToCSV = (log) => {
+                let csvContent = "\uFEFFTime_Seconds,IPD_mm,Left_Eye_X,Left_Eye_Y,Right_Eye_X,Right_Eye_Y,Disparity,Jitter,Stimulus_X_%,Stimulus_Y_%,Stimulus_Size_px\n";
+                log.data.forEach(row => {
+                    const disp = Math.sqrt(Math.pow(row.rightNormX - row.leftNormX, 2) + Math.pow(row.rightNormY - row.leftNormY, 2)).toFixed(2);
+                    csvContent += `${row.timeOffset.toFixed(3)},${row.ipd},${row.leftNormX},${row.leftNormY},${row.rightNormX},${row.rightNormY},${disp},${row.jitterAvg},${row.stimulus.x.toFixed(2)},${row.stimulus.y.toFixed(2)},${row.stimulus.size.toFixed(2)}\n`;
+                });
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob); const link = document.createElement("a");
+                link.setAttribute("href", url); link.setAttribute("download", `ScreeningTest_${log.id}.csv`);
+                document.body.appendChild(link); link.click(); document.body.removeChild(link);
+            };
+
+            const exportToAI = (log) => {
+                const ipds = log.data.map(d => d.ipd).filter(v => v > 0);
+                const meanIpd = ipds.length ? (ipds.reduce((a,b)=>a+b,0)/ipds.length).toFixed(2) : "0";
+                const maxIpd = ipds.length ? Math.max(...ipds).toFixed(2) : "0";
+                const disparities = log.data.map(d => Math.sqrt(Math.pow(d.rightNormX - d.leftNormX, 2) + Math.pow(d.rightNormY - d.leftNormY, 2)));
+                const maxDisparity = disparities.length ? Math.max(...disparities).toFixed(2) : "0";
+                const jitters = log.data.map(d => d.jitterAvg);
+                const meanJitter = jitters.length ? (jitters.reduce((a,b)=>a+b,0)/jitters.length).toFixed(2) : "0";
+                const maxJitter = jitters.length ? Math.max(...jitters).toFixed(2) : "0";
+                const spatialDom = log.stats.rightStd < log.stats.leftStd ? "ימין דומיננטית ויציבה" : "שמאל דומיננטית ויציבה";
+
+                let configText = "";
+                if (log.config.type === 'reading') {
+                    configText = `- קצב קריאה שהוגדר במבדק (Target WPM): ${log.config.readingWpm} מילים לדקה`;
+                } else if (log.config.type === 'tracking') {
+                    configText = `- מהירות זוויתית שהוגדרה: ${log.config.targetVelocityDeg}° לשנייה`;
+                } else {
+                    configText = `- קצב התכנסות שהוגדר: ${log.config.convSpeedHz} Hz`;
+                }
+
+                const promptText = `היי! אתה מנתח נוירו-קוגניטיבי ואופטומטריסט מומחה.
+לפניך נתונים ממבדק סינון עיניים בינוקולרי. סוג המבדק: ${log.type}. משך המבדק: ${log.duration} שניות.
+
+*** נתונים גולמיים מהמבדק ***
+${configText}
+- גודל הגירוי (חדות נדרשת): Snellen 20/${log.config.acuity}
+- ממוצע IPD (מרחק אישונים): ${meanIpd} מ"מ (שיא: ${maxIpd} מ"מ)
+- ממוצע ריצוד (Jitter / Micro-saccades): ${meanJitter}% (שיא חוסר יציבות: ${maxJitter}%)
+- ממוצע פער מבט (Gaze Disparity): ${log.stats.meanDisparity} (שיא פער: ${maxDisparity})
+- סך מצמוצים שנרשמו: ${log.totalBlinks}
+- דומיננטיות מרחבית ויציבות: ${spatialDom} (סטיית תקן עין שמאל: ${log.stats.leftStd}, ימין: ${log.stats.rightStd})
+
+אנא נתח את הנתונים וכתוב דוח אפיון מפורט, מקצועי ומלא בדיוק לפי התבנית הבאה. 
+שים דגש מיוחד על ניתוח מוכנות לקריאה (במיוחד אם המבדק בחן סאקאדות קריאה), רמות עומס קוגניטיבי, ויציבות בינוקולרית.
+
+*** תבנית הדוח הנדרשת ליצירה (דוח אפיון נוירו-קוגניטיבי מורחב) ***
+
+1. תקציר מנהלים (Executive Summary)
+סיכום תמציתי של הפרופיל הקוגניטיבי-ויזואלי. ממצא עיקרי וסטטוס כללי.
+
+2. ניתוח חומרה: חוסן ועמידות (Mental Stamina)
+ניתוח יציבות ה-IPD ורמת Jitter. התייחס לזינוקים כ-Micro-fatigue או כקושי בשמירה על פיקסציה, והסבר את משמעותם על קשב ולמידה.
+
+3. ארכיטקטורת למידה: שילוב דו-עיני (Bilateral Integration)
+נתח את התקשורת בין העיניים על סמך פער המבט (Disparity) והיציבות היחסית (סטיית התקן). התייחס לסנכרון ומאמץ בינוקולרי.
+
+4. מוכנות ומיומנויות קריאה (Literacy Readiness)
+נתח את הדיוק הסאקאדי ורמות הריצוד. האם קצב המבדק שהוגדר תואם ליציבות? התייחס לסאקאדות תיקון (Catch-up) והשפעתם על פענוח טקסט (Decoding).
+
+5. ניתוח פוטנציאל כללי (Cognitive Potential)
+אסטרטגיית פתרון בעיות, והערכת יעילות עיבוד/עומס קוגניטיבי לפי יציבות העיניים.
+
+6. המלצות אופרטיביות (Action Plan)
+המלצות פרקטיות למטופל/מאבחן: התאמות למידה, ניהול עומסים, או הפניה להמשך בירור.
+
+7. אינדקס מדדים טכניים
+הצג בנקודות את המדדים המרכזיים שנותחו.
+
+כתוב את הדוח בשפה מקצועית ואמפתית, המותאמת לסינון ראשוני.`;
+
+                navigator.clipboard.writeText(promptText).then(() => alert('✅ הפקודה הועתקה ללוח!\nהדבק אותה בצ\'אט AI להפקת הדוח המלא.'));
+            };
+
+            const renderSystemStatus = () => (
+                <div className="absolute top-4 right-4 flex flex-col gap-2 bg-slate-800 p-3 rounded-xl border border-slate-700 shadow-lg z-50 pointer-events-none">
+                    <div className="text-xs font-bold text-slate-300 border-b border-slate-600 pb-1 mb-1">סטטוס מערכת</div>
+                    <div className="text-xs text-slate-300 flex items-center gap-2">
+                        <div className={`w-3 h-3 rounded-full ${systemStatus.cam ? 'bg-green-500 animate-pulse shadow-[0_0_8px_#22c55e]' : 'bg-red-500'}`}></div> מצלמה: {systemStatus.cam ? 'פעילה' : 'ממתין'}
+                    </div>
                 </div>
-                <button onClick={handleCalibrationDone} className="mt-4 bg-green-600 hover:bg-green-500 text-white font-bold text-lg px-6 py-4 rounded-xl shadow-lg">שמור כיול וחזור</button>
-            </div>
-        </div>
-    </div>
-);
+            );
+
+            const renderHome = () => (
+                <div className="flex flex-col items-center justify-center h-full fade-in p-8 relative">
+                    {renderSystemStatus()}
+                    <h1 className="text-5xl font-bold text-white mb-4 tracking-tight text-center">מערכת סינון והערכת ראייה</h1>
+                    <p className="text-slate-400 mb-12 text-lg">בחר את הפעולה הרצויה להמשך</p>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-5xl w-full">
+                        <button onClick={() => setAppStage('calibration')} className="bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-2xl p-8 flex flex-col items-center gap-4 transition-all hover:scale-105 shadow-xl group">
+                            <div className="text-5xl group-hover:text-blue-400 transition-colors">🎯</div>
+                            <h2 className="text-2xl font-bold text-white">1. כיול מערכת</h2>
+                            <p className="text-slate-400 text-sm text-center">התאמת המצלמה למרחק וגודל המסך. {calibData.isCalibrated && <span className="text-green-400 block mt-2">✓ המערכת מכוילת</span>}</p>
+                        </button>
+                        
+                        <button onClick={() => setAppStage('diagnostics')} className="bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-2xl p-8 flex flex-col items-center gap-4 transition-all hover:scale-105 shadow-xl group">
+                            <div className="text-5xl group-hover:text-blue-400 transition-colors">👁️</div>
+                            <h2 className="text-2xl font-bold text-white">2. מבדקים ראשוניים</h2>
+                            <p className="text-slate-400 text-sm text-center">קריאה, מעקבים והתכנסות (Focus).</p>
+                        </button>
+
+                        <button onClick={() => setAppStage('data')} className="bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-2xl p-8 flex flex-col items-center gap-4 transition-all hover:scale-105 shadow-xl group">
+                            <div className="text-5xl group-hover:text-blue-400 transition-colors">📊</div>
+                            <h2 className="text-2xl font-bold text-white">3. מאגר נתונים</h2>
+                            <p className="text-slate-400 text-sm text-center">היסטוריית מבדקים והפקת דוחות בינה מלאכותית.</p>
+                        </button>
+                    </div>
+
+                    <div className="absolute bottom-6 text-slate-500 text-sm px-4 text-center">
+                        * המערכת מיועדת לסינון ראשוני בלבד. אינה תחליף לאבחון רפואי/אופטומטרי מסמך.
+                    </div>
+                </div>
+            );
+
+            const renderCalibration = () => (
+                <div className="flex flex-col items-center justify-center h-full p-8 fade-in relative w-full">
+                    {renderSystemStatus()}
+                    <button onClick={() => setAppStage('home')} className="absolute top-8 right-8 text-slate-400 hover:text-white flex items-center gap-2"><span>חזור לראשי</span> <span>➜</span></button>
+                    <h1 className="text-4xl font-bold text-white mb-2">כיול מערכת</h1>
+                    <div className="flex gap-8 items-stretch justify-center w-full max-w-5xl mt-6">
+                        <div className="relative w-[500px] h-[375px] bg-black rounded-xl overflow-hidden border-2 border-slate-700 shadow-xl shrink-0">
+                            {/* התיקון שביקשת כאן */}
+                            {!systemStatus.cam && <div className="absolute inset-0 flex items-center justify-center text-slate-500">מצלמה בטעינה...</div>}
+                            <canvas ref={canvasRef} className="absolute inset-0 w-full h-full transform -scale-x-100" width="640" height="480" />
+                            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 border-4 border-dashed border-blue-500 bg-blue-500/20 transition-all" 
+                                 style={{ width: `${calibBoxWidth}px`, height: `${calibBoxWidth * 0.63}px` }}></div>
+                        </div>
+                        <div className="flex-1 bg-slate-800 p-6 rounded-xl border border-slate-700 flex flex-col justify-center gap-6">
+                            <div>
+                                <label className="text-slate-300 font-bold block mb-2 text-sm text-right">1. התאם גודל כרטיס:</label>
+                                <input type="range" min="20" max="350" value={calibBoxWidth} onChange={(e) => {setCalibBoxWidth(parseInt(e.target.value)); if(!isManualDistance) setManualDistanceCm(Math.round(4763 / parseInt(e.target.value)));}} className="w-full accent-blue-500" />
+                            </div>
+                            <div className="bg-slate-900 p-4 rounded-lg border border-slate-700 text-right">
+                                <label className="text-slate-300 font-bold block mb-2 text-sm text-right">2. מרחק מהמסך (ס"מ):</label>
+                                <input type="number" value={manualDistanceCm} onChange={(e) => {setManualDistanceCm(parseInt(e.target.value)); setIsManualDistance(true);}} className="bg-slate-700 text-white font-mono text-xl p-2 rounded w-24 outline-none focus:border-blue-500 text-center"/>
+                            </div>
+                            <button onClick={handleCalibrationDone} className="mt-4 bg-green-600 hover:bg-green-500 text-white font-bold text-lg px-6 py-4 rounded-xl shadow-lg">שמור כיול וחזור</button>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const renderDiagnosticsMenu = () => (
+                <div className="flex flex-col items-center justify-center h-full p-8 fade-in relative w-full">
+                    {renderSystemStatus()}
+                    <button onClick={() => setAppStage('home')} className="absolute top-8 right-8 text-slate-400 hover:text-white flex items-center gap-2"><span>חזור לראשי</span> <span>➜</span></button>
+                    <h1 className="text-4xl font-bold text-white mb-8">תפריט מבדקים</h1>
+                    
+                    <div className="w-full max-w-4xl bg-slate-800 rounded-2xl border border-slate-700 overflow-hidden shadow-2xl flex flex-col md:flex-row min-h-[400px]">
+                        <div className="md:w-1/3 bg-slate-900 border-l border-slate-700 flex flex-col p-4 gap-2">
+                            <button onClick={() => setTestConfig({...testConfig, type: 'reading'})} className={`p-4 rounded-xl text-right font-bold text-lg transition-colors ${testConfig.type === 'reading' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800'}`}>1. קריאה (Saccades)</button>
+                            <button onClick={() => setTestConfig({...testConfig, type: 'tracking'})} className={`p-4 rounded-xl text-right font-bold text-lg transition-colors ${testConfig.type === 'tracking' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800'}`}>2. מעקבים (Pursuit)</button>
+                            <button onClick={() => setTestConfig({...testConfig, type: 'convergence'})} className={`p-4 rounded-xl text-right font-bold text-lg transition-colors ${testConfig.type === 'convergence' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800'}`}>3. התכנסות (NPC)</button>
+                        </div>
+
+                        <div className="flex-1 p-8 flex flex-col justify-between">
+                            <div>
+                                <h2 className="text-2xl font-bold text-blue-300 mb-6 border-b border-slate-700 pb-2">
+                                    {testConfig.type === 'reading' ? 'הגדרות בחינת קריאה' : testConfig.type === 'tracking' ? 'הגדרות מעקב' : 'הגדרות התכנסות'}
+                                </h2>
+                                <div className="space-y-6">
+                                    <div className="bg-slate-900 p-4 rounded-lg border border-slate-700 relative">
+                                        <div className="flex justify-between text-sm mb-2 text-slate-300"><label>גודל גירוי (חדות נדרשת):</label><span className="font-bold text-white">Snellen 20/{testConfig.acuity}</span></div>
+                                        <input type="range" min="20" max="200" step="10" value={testConfig.acuity} onChange={e => setTestConfig({...testConfig, acuity: parseInt(e.target.value)})} className="w-full accent-blue-500" />
+                                        <div className="text-[10px] text-slate-500 mt-2 border-t border-slate-700 pt-1">
+                                            * נבדקים עם משקפי קריאה (לדוגמה +1.75D) חייבים להרכיבם. מומלץ: 20/30 - 20/40.
+                                        </div>
+                                    </div>
+                                    
+                                    {testConfig.type === 'reading' && (
+                                        <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
+                                            <div className="flex justify-between text-sm mb-2 text-slate-300"><label>קצב קריאה (מילים לדקה):</label><span className="font-bold text-white">{testConfig.readingWpm} WPM</span></div>
+                                            <input type="range" min="40" max="300" step="10" value={testConfig.readingWpm} onChange={e => setTestConfig({...testConfig, readingWpm: parseInt(e.target.value)})} className="w-full accent-blue-500" />
+                                        </div>
+                                    )}
+
+                                    {testConfig.type === 'tracking' && (
+                                        <>
+                                            <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
+                                                <label className="text-sm mb-2 block text-slate-300">סוג מעקב:</label>
+                                                <select value={testConfig.trackVector} onChange={e => setTestConfig({...testConfig, trackVector: e.target.value})} className="bg-slate-800 text-white p-2 rounded outline-none w-full border border-slate-600">
+                                                    <option value="horizontal">אופקי</option><option value="vertical">אנכי</option><option value="figure8">שמיניה</option>
+                                                </select>
+                                            </div>
+                                            <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
+                                                <div className="flex justify-between text-sm mb-2 text-slate-300"><label>מהירות זוויתית:</label><span className="font-bold text-white">{testConfig.targetVelocityDeg}°/s</span></div>
+                                                <input type="range" min="5" max="50" step="5" value={testConfig.targetVelocityDeg} onChange={e => setTestConfig({...testConfig, targetVelocityDeg: parseInt(e.target.value)})} className="w-full accent-blue-500" />
+                                            </div>
+                                        </>
+                                    )}
+
+                                    {testConfig.type === 'convergence' && (
+                                        <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
+                                            <div className="flex justify-between text-sm mb-2 text-slate-300"><label>קצב התקרבות (Hz):</label><span className="font-bold text-white">{testConfig.convSpeedHz}</span></div>
+                                            <input type="range" min="0.1" max="2" step="0.1" value={testConfig.convSpeedHz} onChange={e => setTestConfig({...testConfig, convSpeedHz: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                            <button onClick={startTestFlow} className="mt-8 bg-green-600 hover:bg-green-500 text-white font-bold text-xl py-4 rounded-xl shadow-lg transition-transform hover:scale-[1.02] w-full">התחל מבדק</button>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const renderTesting = () => (
+                <div className="flex-col h-full w-full relative bg-black fade-in flex">
+                    <header className="absolute top-0 w-full p-4 flex justify-between items-center z-50 pointer-events-none">
+                        <div className="flex gap-4">
+                            <div className="bg-slate-900/80 backdrop-blur px-4 py-2 rounded-lg border border-slate-700 pointer-events-auto flex flex-col items-center">
+                                <span className="text-[10px] text-slate-400 block mb-1 uppercase tracking-wider">ממוצעים רצים</span>
+                                <div className="flex gap-4 text-center">
+                                    <div><span className="text-[10px] text-slate-400">IPD</span><div className="text-white font-bold">{metrics.avgIpd}</div></div>
+                                    <div><span className="text-[10px] text-slate-400">ריצוד</span><div className="text-white font-bold">{metrics.avgJitter}%</div></div>
+                                    <div><span className="text-[10px] text-yellow-500">מצמוצים</span><div className="text-yellow-400 font-bold">{metrics.blinkCount}</div></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="pointer-events-auto flex items-center gap-4">
+                            {testState === 'running' && (
+                                <div className="bg-slate-800 px-3 py-1 rounded text-sm text-green-400 border border-green-500/50 flex items-center gap-2">
+                                    <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse shadow-[0_0_8px_#22c55e]"></span>
+                                    הקלטה פעילה: {metrics.dataPoints} דגימות
+                                </div>
+                            )}
+                            {testState === 'countdown' && <span className="text-yellow-400 font-bold text-xl animate-pulse">הכן את הנבדק...</span>}
+                            <button onClick={stopTestFlow} className="bg-red-600 hover:bg-red-500 text-white px-8 py-3 rounded-lg font-bold shadow-lg" disabled={testState === 'countdown'}>⏹ סיים בדיקה</button>
+                        </div>
+                    </header>
+
+                    <div className="flex-1 relative overflow-hidden cursor-crosshair">
+                        <div ref={stimulusDivRef} className={`absolute rounded-full border-2 border-white flex items-center justify-center transform -translate-x-1/2 -translate-y-1/2 shadow-[0_0_15px_rgba(255,255,255,0.4)] ${testState === 'countdown' ? 'animate-ping' : ''}`}
+                            style={{ display: 'flex', backgroundColor: testConfig.color, width: '40px', height: '40px', left: '50%', top: '50%' }}>
+                            <span className="text-white font-black drop-shadow-md pointer-events-none font-sans" style={{fontSize: '70%', lineHeight: 1}}>E</span>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const renderDataDashboard = () => (
+                <div className="flex flex-col h-full p-8 fade-in relative w-full bg-slate-900">
+                    <header className="flex justify-between items-center mb-6 border-b border-slate-800 pb-4">
+                        <h1 className="text-4xl font-bold text-white">מאגר נתונים ודוחות מורחבים</h1>
+                        <button onClick={() => setAppStage('home')} className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-2 rounded-lg font-bold transition-colors">חזור למסך ראשי 🏠</button>
+                    </header>
+
+                    {runLogs.length === 0 ? (
+                        <div className="flex-1 flex items-center justify-center text-slate-500 text-xl">אין נתונים להצגה. בצע מבדקים תחילה.</div>
+                    ) : (
+                        <div className="flex-1 overflow-y-auto space-y-6 pr-2 custom-scrollbar">
+                            {runLogs.map((log, i) => (
+                                <div key={log.id} className="bg-slate-800 rounded-2xl border border-slate-700 p-6 flex flex-col shadow-lg relative">
+                                    <div className="flex justify-between items-start mb-4">
+                                        <div>
+                                            <h2 className="text-2xl font-bold text-blue-300">דוח מבדק #{runLogs.length - i} - {log.type}</h2>
+                                            <div className="text-slate-400 mt-2 flex gap-4 text-sm bg-slate-900 p-3 rounded-lg border border-slate-700/50 inline-flex">
+                                                <span>תאריך: <strong className="text-white">{log.time}</strong></span>
+                                                <span>| זמן: <strong className="text-white">{log.duration}s</strong></span>
+                                                <span>| יציבות שמאל: <strong className="text-blue-400">{log.stats.leftStd}</strong></span>
+                                                <span>| יציבות ימין: <strong className="text-red-400">{log.stats.rightStd}</strong></span>
+                                                <span>| ממוצע פער: <strong className="text-purple-400">{log.stats.meanDisparity}</strong></span>
+                                            </div>
+                                        </div>
+                                        <div className="flex gap-3 flex-col items-end">
+                                            <button onClick={() => exportToAI(log)} className="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded-lg border border-indigo-400 font-bold shadow-md flex items-center gap-2 transition-transform hover:scale-[1.02]">
+                                                🤖 הפק דוח אפיון מורחב (AI)
+                                            </button>
+                                            <div className="flex gap-2">
+                                                <button onClick={() => exportToCSV(log)} className="bg-green-700 hover:bg-green-600 text-white text-[11px] px-3 py-1.5 rounded border border-green-500 font-bold">💾 שמור CSV</button>
+                                                <button onClick={() => setFullscreenChartData(log)} className="bg-slate-700 hover:bg-slate-600 text-white text-[11px] px-3 py-1.5 rounded border border-slate-500">🔍 הגדל גרף</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="h-[300px] w-full bg-black/50 rounded-xl border border-slate-700 p-4">
+                                        <RunCharts data={log.data} testType={log.type} isFullscreen={false} />
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {fullscreenChartData && (
+                        <div className="fixed inset-0 z-50 bg-slate-900/95 flex flex-col p-8 backdrop-blur-md">
+                            <div className="flex justify-between items-center mb-6 border-b border-slate-700 pb-4">
+                                <div>
+                                    <h2 className="text-3xl font-bold text-white mb-2">תצוגת גרף מורחבת</h2>
+                                    <p className="text-slate-400 text-sm">מבדק: {fullscreenChartData.type}</p>
+                                </div>
+                                <button onClick={() => setFullscreenChartData(null)} className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-bold shadow-lg text-lg">סגור ✖</button>
+                            </div>
+                            <div className="flex-1 bg-black/50 rounded-2xl border border-slate-700 p-6 flex flex-col">
+                                <RunCharts data={fullscreenChartData.data} testType={fullscreenChartData.type} isFullscreen={true} />
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+
+            return (
+                <div className="h-full w-full bg-slate-900 text-slate-100 font-sans overflow-hidden">
+                    <div className="hidden"><video ref={videoRef} playsInline autoPlay muted /></div>
+                    {appStage === 'home' && renderHome()}
+                    {appStage === 'calibration' && renderCalibration()}
+                    {appStage === 'diagnostics' && renderDiagnosticsMenu()}
+                    {appStage === 'testing' && renderTesting()}
+                    {appStage === 'data' && renderDataDashboard()}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
