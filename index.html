@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <title>מערכת סינון ראייה - V21 (Angular Velocity & Documented Math)</title>
+    <title>מערכת סינון ראייה - V22 (Main Thread Optimized & Throttled UI)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -10,6 +10,7 @@
     
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
     <style>
@@ -27,30 +28,22 @@
     <script type="text/babel">
         /*
         =================================================================================================
-                                    תיעוד אסטרטגיות חישוב והצגת נתונים (Math & Logic Strategies)
+                                    תיעוד אסטרטגיות חישוב והצגת נתונים 
         =================================================================================================
         
         1. אסטרטגיית זיהוי מצמוצים (EAR - Eye Aspect Ratio):
-           במקום למדוד פיקסלים מוחלטים (שתלויים במרחק מהמצלמה), המערכת מודדת את יחס הממדים של העין.
-           EAR = (גובה העין) / (רוחב העין).
-           כאשר EAR צונח מתחת לסף מסוים (למשל 0.18), הדבר מזוהה כמצמוץ ודאי בכל מרחק.
+           מחושב על ידי יחס הממדים של העין (גובה חלקי רוחב). 
+           כאשר EAR צונח מתחת ל-0.18, הדבר מזוהה כמצמוץ, ללא תלות במרחק הנבדק מהמסך.
 
         2. אסטרטגיית חישוב מהירות זוויתית (Angular Velocity):
-           מטרתנו שהגירוי ינוע במהירות אחידה של 'X מעלות לשנייה', ללא קשר לגודל המסך.
-           - המערכת יודעת מה רוחב התנועה במילימטרים (Amplitude) על בסיס נתוני הכיול.
-           - היא יודעת את מרחק הנבדק מהמסך במילימטרים (D).
-           - מהירות ליניארית מקסימלית של גל סינוס: V_max = Amplitude * 2 * PI * F (כאשר F זה התדר ב-Hz).
-           - המרה למעלות: Deg_Sec = (V_max / D) * (180 / PI) = (Amplitude * 360 * F) / D.
-           מכאן מחולץ התדר (F) הנדרש כדי לייצר את המהירות הזוויתית שהוגדרה ב-Slider.
+           מטרתנו שהגירוי ינוע במהירות אחידה של 'X מעלות לשנייה'.
+           - מחלצים את רוחב התנועה במילימטרים ואת מרחק הישיבה.
+           - משתמשים בנוסחה: Deg_Sec = (Amplitude * 360 * F) / Distance
+           ומכך נגזר התדר (F) הנדרש ב-Hz לביצוע התנועה החלקה.
 
-        3. אסטרטגיית חישוב פער בינוקולרי (Gaze Disparity):
-           ההפרש בסנכרון בין שתי העיניים. מחושב כמרחק האוקלידי (Euclidean Distance) 
-           בין הקואורדינטות המנורמלות של עין ימין לעין שמאל: sqrt((Rx - Lx)^2 + (Ry - Ly)^2).
-
-        4. אסטרטגיית הצגת נתונים (Custom Chart Events):
-           - חציית אמצע: מזוהה כאשר ה-X של הגירוי עצמו עובר את ערך ה-50%.
-           - נקודות קצה (Min/Max): מחושב באמצעות בדיקת נגזרת (Change of Sign). כשההפרש בין 
-             שני פריימים עוקבים של הגירוי משנה סימן (מחיובי לשלילי), מסומן קצה מחזור.
+        3. אסטרטגיית מניעת גמגומים באנימציה (UI Throttling):
+           רשת העצבים (FaceMesh) מקליטה 100% מהפריימים לקובץ. עם זאת, התצוגה של המדדים 
+           (React state) מתעדכנת רק פעם ב-4 פריימים. זה משחרר את המעבד לאנימציה חלקה.
         =================================================================================================
         */
 
@@ -81,37 +74,6 @@
             const mean = array.reduce((a, b) => a + b) / array.length;
             return Math.sqrt(array.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b) / array.length);
         };
-
-        // --- Web Worker Logic ---
-        const workerCode = `
-            importScripts('https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js');
-            
-            let faceMesh = new FaceMesh({
-                locateFile: (file) => 'https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/' + file
-            });
-            
-            faceMesh.setOptions({
-                maxNumFaces: 1,
-                refineLandmarks: true,
-                minDetectionConfidence: 0.5,
-                minTrackingConfidence: 0.5
-            });
-
-            faceMesh.onResults((results) => {
-                if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-                    postMessage({ landmarks: results.multiFaceLandmarks[0] });
-                } else {
-                    postMessage({ landmarks: null });
-                }
-            });
-
-            onmessage = async (e) => {
-                if (e.data.image) {
-                    await faceMesh.send({ image: e.data.image });
-                    e.data.image.close(); 
-                }
-            };
-        `;
 
         // --- רכיב הגרפים ---
         function RunCharts({ data, testType, isFullscreen = false }) {
@@ -208,9 +170,6 @@
             const stimulusDivRef = useRef(null);
             const animationLoopRef = useRef(null);
             
-            const workerRef = useRef(null);
-            const latestLandmarksRef = useRef(null);
-
             const [appStage, setAppStage] = useState('home');
             const [cameraActive, setCameraActive] = useState(false);
             const [testState, setTestState] = useState('idle');
@@ -226,16 +185,16 @@
             const currentRunBlinksRef = useRef([]);
             const isBlinkingStateRef = useRef(false);
             const lastNormPosRef = useRef({ leftX: 0, leftY: 0, rightX: 0, rightY: 0 });
+            const uiFrameCountRef = useRef(0); // משמש ל-Throttling של ה-UI
             
             const currentStimulusPosRef = useRef({ x: 50, y: 50, size: 40 });
 
             const [metrics, setMetrics] = useState({ ipdMm: 0, leftNormX: 0, rightNormX: 0, leftNormY: 0, rightNormY: 0, blinkCount: 0 });
             
-            // testConfig מכיל עכשיו targetVelocityDeg (עבור מעקבים) ו-convSpeedHz (עבור התכנסות)
             const [testConfig, setTestConfig] = useState({ 
                 type: 'tracking', color: '#3b82f6', 
-                targetVelocityDeg: 20, // ברירת מחדל 20 מעלות לשנייה
-                convSpeedHz: 0.5,      // ברירת מחדל להתכנסות
+                targetVelocityDeg: 20, 
+                convSpeedHz: 0.5,      
                 trackVector: 'horizontal', acuity: 40 
             });
             const [calculatedSizeMm, setCalculatedSizeMm] = useState(0);
@@ -243,50 +202,37 @@
             const [runLogs, setRunLogs] = useState([]);
             const [fullscreenChartData, setFullscreenChartData] = useState(null);
 
-            useEffect(() => {
-                const blob = new Blob([workerCode], { type: 'application/javascript' });
-                workerRef.current = new Worker(URL.createObjectURL(blob));
-                
-                workerRef.current.onmessage = (e) => {
-                    const lm = e.data.landmarks;
-                    latestLandmarksRef.current = lm; 
-                    if (lm) processLandmarks(lm);
-                };
+            // Refs יציבים למניעת יצירה מחדש של פונקציות Callback
+            const appStageRef = useRef(appStage);
+            useEffect(() => { appStageRef.current = appStage; }, [appStage]);
+            
+            const calibDataRef = useRef(calibData);
+            useEffect(() => { calibDataRef.current = calibData; }, [calibData]);
 
+            // אתחול המצלמה במיינטרד (Main Thread) למניעת קריסות DOM של MediaPipe
+            useEffect(() => {
+                let camera = null; let faceMesh = null;
                 const startTracking = async () => {
-                    const camera = new window.Camera(videoRef.current, {
-                        onFrame: async () => {
-                            if (appStageRef.current === 'calibration' && canvasRef.current) {
-                                const ctx = canvasRef.current.getContext('2d');
-                                ctx.clearRect(0, 0, 640, 480);
-                                ctx.drawImage(videoRef.current, 0, 0, 640, 480);
-                                if (latestLandmarksRef.current) {
-                                    window.drawConnectors(ctx, latestLandmarksRef.current, window.FACEMESH_TESSELATION, { color: '#C0C0C040', lineWidth: 0.5 });
-                                    window.drawConnectors(ctx, latestLandmarksRef.current, window.FACEMESH_RIGHT_IRIS, { color: '#FF3030', lineWidth: 2 });
-                                    window.drawConnectors(ctx, latestLandmarksRef.current, window.FACEMESH_LEFT_IRIS, { color: '#FF3030', lineWidth: 2 });
-                                }
-                            }
-                            if (workerRef.current) {
-                                try {
-                                    const bitmap = await createImageBitmap(videoRef.current);
-                                    workerRef.current.postMessage({ image: bitmap }, [bitmap]);
-                                } catch (err) {}
-                            }
-                        },
-                        width: 640, height: 480
+                    if (!window.FaceMesh) return;
+                    faceMesh = new window.FaceMesh({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}` });
+                    faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+                    faceMesh.onResults(onResults);
+                    camera = new window.Camera(videoRef.current, { 
+                        onFrame: async () => { await faceMesh.send({ image: videoRef.current }); }, 
+                        width: 640, height: 480 
                     });
                     await camera.start();
                     setCameraActive(true);
                 };
                 setTimeout(startTracking, 1000);
-
-                return () => { if (workerRef.current) workerRef.current.terminate(); };
             }, []);
 
-            const appStageRef = useRef(appStage);
-            useEffect(() => { appStageRef.current = appStage; }, [appStage]);
+            // חישוב המהירות הזוויתית המשוערת
+            const angularVelocity = useMemo(() => {
+                if (testConfig.type !== 'tracking') return 0;
+                return testConfig.targetVelocityDeg.toFixed(1);
+            }, [testConfig.targetVelocityDeg]);
 
-            // חישוב גודל הגירוי (Acuity/Snellen)
             const getBaseStimulusSizePx = useCallback(() => {
                 const distanceMeters = (calibData.distanceCm || 50) / 100;
                 const mUnit = distanceMeters * (testConfig.acuity / 20);
@@ -300,9 +246,23 @@
                 setCalculatedSizeMm(sizeMm);
             }, [getBaseStimulusSizePx]);
 
-            const processLandmarks = useCallback((lm) => {
+            const onResults = useCallback((results) => {
                 const width = 640; const height = 480;
                 
+                if (appStageRef.current === 'calibration' && canvasRef.current) {
+                    const ctx = canvasRef.current.getContext('2d');
+                    ctx.clearRect(0, 0, width, height);
+                    ctx.drawImage(results.image, 0, 0, width, height);
+                    if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+                        window.drawConnectors(ctx, results.multiFaceLandmarks[0], window.FACEMESH_TESSELATION, { color: '#C0C0C040', lineWidth: 0.5 });
+                        window.drawConnectors(ctx, results.multiFaceLandmarks[0], window.FACEMESH_RIGHT_IRIS, { color: '#FF3030', lineWidth: 2 });
+                        window.drawConnectors(ctx, results.multiFaceLandmarks[0], window.FACEMESH_LEFT_IRIS, { color: '#FF3030', lineWidth: 2 });
+                    }
+                }
+                
+                if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) return;
+                const lm = results.multiFaceLandmarks[0];
+
                 const rightNormX = ((lm[RIGHT_PUPIL].x - lm[RIGHT_EYE_INNER].x) / (lm[RIGHT_EYE_OUTER].x - lm[RIGHT_EYE_INNER].x)) * 100;
                 const leftNormX = ((lm[LEFT_PUPIL].x - lm[LEFT_EYE_OUTER].x) / (lm[LEFT_EYE_INNER].x - lm[LEFT_EYE_OUTER].x)) * 100;
                 const rightNormY = ((lm[RIGHT_PUPIL].y - lm[RIGHT_EYE_TOP].y) / (lm[RIGHT_EYE_BOTTOM].y - lm[RIGHT_EYE_TOP].y)) * 100;
@@ -311,7 +271,7 @@
                 const dx = (lm[LEFT_PUPIL].x - lm[RIGHT_PUPIL].x) * width;
                 const dy = (lm[LEFT_PUPIL].y - lm[RIGHT_PUPIL].y) * height;
                 const ipdPx = Math.sqrt(dx*dx + dy*dy);
-                const currentIpdMm = ipdPx * (calibData.mmPerPx || 1);
+                const currentIpdMm = ipdPx * (calibDataRef.current.mmPerPx || 1);
 
                 const rightW = pDist(lm[33], lm[133], width, height);
                 const rightH = pDist(lm[159], lm[145], width, height);
@@ -329,6 +289,7 @@
                     if (!isBlinkingStateRef.current) { isBlinkingStateRef.current = true; justBlinked = true; }
                 } else { isBlinkingStateRef.current = false; }
 
+                // הקלטה מלאה (ללא Throttling) לזיכרון
                 if (isRecordingRef.current && runStartTimeRef.current) {
                     const timeOffset = (Date.now() - runStartTimeRef.current) / 1000;
                     if (justBlinked) currentRunBlinksRef.current.push(timeOffset);
@@ -342,15 +303,17 @@
                     });
                 }
                 
-                if (appStageRef.current === 'testing') {
+                // UI Throttling - מעדכן את המסך רק כל פריים 4 כדי למנוע גמגום אנימציה
+                uiFrameCountRef.current++;
+                if (appStageRef.current === 'testing' && uiFrameCountRef.current % 4 === 0) {
                     setMetrics({ 
                         ipdMm: currentIpdMm.toFixed(1), leftNormX: leftNormX.toFixed(1), rightNormX: rightNormX.toFixed(1), 
                         leftNormY: leftNormY.toFixed(1), rightNormY: rightNormY.toFixed(1), blinkCount: currentRunBlinksRef.current.length 
                     });
                 }
-            }, [calibData.mmPerPx]);
+            }, []);
 
-            // אנימציית הגירוי
+            // אנימציית הגירוי - חלקה לחלוטין!
             useEffect(() => {
                 if (appStage !== 'testing' || testState !== 'running') {
                     if (animationLoopRef.current) cancelAnimationFrame(animationLoopRef.current);
@@ -360,13 +323,11 @@
                 const startTime = Date.now();
                 const { sizePx: baseSizePx } = getBaseStimulusSizePx();
 
-                // חישוב התדר ההכרחי (Hz) להשגת המהירות הזוויתית המבוקשת (רק במעקבים)
                 let freqHz = 0.5; 
                 if (testConfig.type === 'tracking') {
                     const amplitudePx = window.innerWidth * 0.4;
                     const amplitudeMm = amplitudePx * (calibData.mmPerPx || 1);
                     const distanceMm = (calibData.distanceCm || 50) * 10;
-                    // F = (w_deg * D) / (A * 360)
                     freqHz = (testConfig.targetVelocityDeg * distanceMm) / (amplitudeMm * 360);
                 } else {
                     freqHz = testConfig.convSpeedHz;
@@ -389,6 +350,7 @@
                         const endDistCm = 5; 
                         const maxScale = startDistCm / endDistCm;
                         const maxSizePx = baseSizePx * maxScale;
+                        
                         const scaleCycle = (Math.sin(t * freqHz * Math.PI * 2) + 1) / 2;
                         size = baseSizePx + scaleCycle * (maxSizePx - baseSizePx);
                     }
@@ -600,7 +562,7 @@
                                                     <option value="horizontal">אופקי</option><option value="vertical">אנכי</option><option value="figure8">שמיניה</option>
                                                 </select>
                                             </div>
-                                            {/* בורר מהירות זוויתית מותאם אישית למעקבים */}
+                                            {/* בורר מהירות זוויתית (5 עד 50 בקפיצות של 5) */}
                                             <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
                                                 <div className="flex justify-between text-sm mb-2 text-slate-300">
                                                     <label>מהירות זוויתית (מעלות/שנייה):</label>
